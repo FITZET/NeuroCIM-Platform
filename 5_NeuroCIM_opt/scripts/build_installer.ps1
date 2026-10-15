@@ -3,6 +3,7 @@ param(
     [string]$Flavor,
     [ValidatePattern("^\d+\.\d+\.\d+$")]
     [string]$Version,
+    [string]$ClientId = $env:NEUROCIM_GITHUB_CLIENT_ID,
     [switch]$SkipTests,
     [switch]$ReuseFrozen
 )
@@ -13,6 +14,11 @@ $releaseRoot = Join-Path $platform "release"
 $portable = Join-Path $releaseRoot "NeuroCIM-Windows-x64"
 $artifactRoot = Join-Path $releaseRoot ("artifacts\" + $Flavor.ToLowerInvariant())
 $iss = Join-Path $platform "packaging\neurocim-installer.iss"
+if (-not $ClientId) {
+    throw "Set NEUROCIM_GITHUB_CLIENT_ID or pass -ClientId so authenticated updates can work."
+}
+python (Join-Path $platform "scripts\configure_release.py") --client-id $ClientId
+if ($LASTEXITCODE -ne 0) { throw "Release configuration failed" }
 
 $torchFlavor = python -c "import torch; print('GPU' if torch.version.cuda else 'CPU')"
 if ($LASTEXITCODE -ne 0) { throw "Cannot inspect the installed PyTorch build" }

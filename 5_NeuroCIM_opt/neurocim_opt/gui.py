@@ -11,11 +11,11 @@ from typing import Any
 import numpy as np
 
 from PySide6.QtCore import QEvent, QObject, QSize, QSettings, QThread, QTimer, Signal, Qt
-from PySide6.QtGui import QFont, QFontDatabase, QImage, QPixmap
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox as _QComboBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
     QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+    QProgressBar, QProgressDialog, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
     QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -38,6 +38,13 @@ from .training_service import (
     ErrorAwareTrainingService, TrainingCancelled, TrainingOutcome, TrainingRequest,
 )
 from .workflow import ErrorModelRegistry, WorkflowContext
+from .paths import output_root
+from .release_config import ACCESS_PORTAL_URL
+from .updater import (
+    AvailableUpdate, CredentialStore, GitHubReleaseClient, UpdateError,
+    installed_flavor, launch_installer,
+)
+from .version import __version__
 
 
 def _high_dpi_pixmap(
@@ -71,6 +78,51 @@ def _high_dpi_pixmap(
     rendered = source.scaled(physical, Qt.AspectRatioMode.KeepAspectRatio, mode)
     rendered.setDevicePixelRatio(ratio)
     return rendered
+
+
+class UpdateCheckThread(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, platform_root: Path):
+        super().__init__()
+        self.platform_root = platform_root
+
+    def run(self) -> None:
+        try:
+            client = GitHubReleaseClient()
+            update = client.latest_update(
+                flavor=installed_flavor(self.platform_root), current=__version__
+            )
+            self.succeeded.emit(update)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class UpdateDownloadThread(QThread):
+    progressed = Signal(str, int)
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, update: AvailableUpdate):
+        super().__init__()
+        self.update = update
+
+    def run(self) -> None:
+        try:
+            destination = output_root().parent / "updates" / self.update.version
+            client = GitHubReleaseClient()
+
+            def report(name: str, done: int, total: int) -> None:
+                percent = round(done * 100 / total) if total else 0
+                self.progressed.emit(name, percent)
+
+            installer = client.download_update_package(
+                self.update, destination, progress=report
+            )
+            self.succeeded.emit(str(installer))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class QComboBox(_QComboBox):
@@ -2895,11 +2947,15 @@ class UnifiedBatchInferenceWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self, platform_root: Path):
         super().__init__()
+        self.platform_root = Path(platform_root).resolve()
+        self.update_check_thread: UpdateCheckThread | None = None
+        self.update_download_thread: UpdateDownloadThread | None = None
+        self.update_progress: QProgressDialog | None = None
         application = QApplication.instance()
         if application is not None:
             configure_windows_font(application)
             apply_application_style(application)
-        self.setWindowTitle("DRAM 存算仿真平台 — NeuroSim")
+        self.setWindowTitle(f"DRAM 存算仿真平台 — NeuroSim  v{__version__}")
         self.setMinimumSize(720, 420)
         screen = QApplication.primaryScreen()
         if screen is not None:
@@ -2943,7 +2999,112 @@ class MainWindow(QMainWindow):
         )
         self.setCentralWidget(self.tabs)
         self.statusBar().showMessage("就绪")
+        help_menu = self.menuBar().addMenu("帮助")
+        update_action = QAction("检查更新", self)
+        update_action.triggered.connect(lambda: self._check_for_updates(interactive=True))
+        help_menu.addAction(update_action)
+        help_menu.addSeparator()
+        version_action = QAction(f"当前版本：{__version__}", self)
+        version_action.setEnabled(False)
+        help_menu.addAction(version_action)
         self._apply_visual_roles()
+        if CredentialStore.load():
+            QTimer.singleShot(5000, lambda: self._check_for_updates(interactive=False))
+
+    def _check_for_updates(self, *, interactive: bool) -> None:
+        if self.update_check_thread is not None and self.update_check_thread.isRunning():
+            return
+        if not CredentialStore.load():
+            if interactive:
+                box = QMessageBox(self)
+                box.setWindowTitle("NeuroCIM更新")
+                box.setIcon(QMessageBox.Icon.Information)
+                box.setText("尚未登录获批的GitHub账号。")
+                box.setInformativeText("请通过安装引导程序登录；未注册用户请先打开访问申请网页。")
+                apply_button = box.addButton("打开申请网页", QMessageBox.ButtonRole.ActionRole)
+                box.addButton(QMessageBox.StandardButton.Close)
+                box.exec()
+                if box.clickedButton() is apply_button:
+                    from PySide6.QtCore import QUrl
+                    QDesktopServices.openUrl(QUrl(ACCESS_PORTAL_URL))
+            return
+        self.statusBar().showMessage("正在检查NeuroCIM更新……")
+        self.update_check_thread = UpdateCheckThread(self.platform_root)
+        self.update_check_thread.succeeded.connect(
+            lambda update, value=interactive: self._update_check_succeeded(update, value)
+        )
+        self.update_check_thread.failed.connect(
+            lambda message, value=interactive: self._update_check_failed(message, value)
+        )
+        self.update_check_thread.finished.connect(self._update_check_finished)
+        self.update_check_thread.start()
+
+    def _update_check_succeeded(
+        self, update: AvailableUpdate | None, interactive: bool
+    ) -> None:
+        if update is None:
+            self.statusBar().showMessage(f"NeuroCIM {__version__} 已是最新版本", 5000)
+            if interactive:
+                QMessageBox.information(self, "NeuroCIM更新", "当前已经是最新版本。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "发现NeuroCIM更新",
+            f"发现版本 {update.version}（{update.flavor.upper()}版）。\n\n"
+            "是否立即下载并安装？软件将在校验完成后关闭。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._download_update(update)
+
+    def _update_check_failed(self, message: str, interactive: bool) -> None:
+        self.statusBar().showMessage("更新检查失败", 5000)
+        if interactive:
+            QMessageBox.warning(self, "NeuroCIM更新", message)
+
+    def _update_check_finished(self) -> None:
+        if self.update_check_thread is not None:
+            self.update_check_thread.deleteLater()
+        self.update_check_thread = None
+
+    def _download_update(self, update: AvailableUpdate) -> None:
+        self.update_progress = QProgressDialog("准备下载更新……", "取消", 0, 100, self)
+        self.update_progress.setWindowTitle("NeuroCIM在线更新")
+        self.update_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.update_progress.setAutoClose(False)
+        self.update_progress.setCancelButton(None)
+        self.update_progress.setValue(0)
+        self.update_download_thread = UpdateDownloadThread(update)
+
+        def report(name: str, percent: int) -> None:
+            if self.update_progress is not None:
+                self.update_progress.setLabelText(f"正在下载 {name}")
+                self.update_progress.setValue(percent)
+
+        self.update_download_thread.progressed.connect(report)
+        self.update_download_thread.succeeded.connect(self._update_download_succeeded)
+        self.update_download_thread.failed.connect(self._update_download_failed)
+        self.update_download_thread.finished.connect(self._update_download_finished)
+        self.update_download_thread.start()
+
+    def _update_download_succeeded(self, installer: str) -> None:
+        if self.update_progress is not None:
+            self.update_progress.setValue(100)
+            self.update_progress.close()
+        launch_installer(Path(installer))
+        QApplication.quit()
+
+    def _update_download_failed(self, message: str) -> None:
+        if self.update_progress is not None:
+            self.update_progress.close()
+        QMessageBox.critical(self, "NeuroCIM更新失败", message)
+
+    def _update_download_finished(self) -> None:
+        if self.update_download_thread is not None:
+            self.update_download_thread.deleteLater()
+        self.update_download_thread = None
+        self.update_progress = None
 
     def _apply_visual_roles(self) -> None:
         """Assign visual roles and table defaults without changing behavior."""

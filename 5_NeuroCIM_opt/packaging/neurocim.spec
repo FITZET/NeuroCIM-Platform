@@ -23,6 +23,7 @@ hiddenimports = []
 for package in (
     "data_fitting", "fault_layers", "lenet5", "resnet20", "bnn",
     "tiny_transformer", "gpt2_cim", "boto3", "botocore", "s3transfer", "jmespath",
+    "keyring",
 ):
     hiddenimports.extend(collect_submodules(package))
 hiddenimports.extend([
@@ -30,6 +31,7 @@ hiddenimports.extend([
     "torchvision.transforms",
     "matplotlib.backends.backend_agg",
     "openpyxl",
+    "keyring.backends.Windows",
 ])
 
 a = Analysis(

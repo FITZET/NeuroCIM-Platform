@@ -15,12 +15,13 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .version import __version__
+from .release_config import GITHUB_DISTRIBUTION_REPOSITORY, GITHUB_OAUTH_CLIENT_ID, GITHUB_OWNER
 
 
 GITHUB_API = "https://api.github.com"
 GITHUB_LOGIN = "https://github.com/login"
-DEFAULT_OWNER = "FITZET"
-DEFAULT_REPOSITORY = "NeuroCIM-Distribution"
+DEFAULT_OWNER = GITHUB_OWNER
+DEFAULT_REPOSITORY = GITHUB_DISTRIBUTION_REPOSITORY
 CREDENTIAL_SERVICE = "NeuroCIM-GitHub"
 CREDENTIAL_USER = "release-access-token"
 
@@ -143,7 +144,9 @@ class GitHubReleaseClient:
     ) -> None:
         self.owner = owner
         self.repository = repository
-        self.client_id = client_id or os.environ.get("NEUROCIM_GITHUB_CLIENT_ID", "")
+        self.client_id = client_id or os.environ.get(
+            "NEUROCIM_GITHUB_CLIENT_ID", GITHUB_OAUTH_CLIENT_ID
+        )
         self.token = token or CredentialStore.load()
 
     @staticmethod

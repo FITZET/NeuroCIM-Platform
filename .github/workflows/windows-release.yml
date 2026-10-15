@@ -25,6 +25,7 @@ jobs:
     runs-on: windows-latest
     env:
       GH_TOKEN: ${{ secrets.DISTRIBUTION_TOKEN }}
+      NEUROCIM_GITHUB_CLIENT_ID: ${{ secrets.NEUROCIM_GITHUB_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,7 +58,7 @@ jobs:
       - name: Build ${{ matrix.flavor }} installer
         shell: pwsh
         working-directory: 5_NeuroCIM_opt
-        run: .\scripts\build_installer.ps1 -Flavor ${{ matrix.flavor }} -Version $env:NEUROCIM_VERSION
+        run: .\scripts\build_installer.ps1 -Flavor ${{ matrix.flavor }} -Version $env:NEUROCIM_VERSION -ClientId $env:NEUROCIM_GITHUB_CLIENT_ID
       - uses: actions/upload-artifact@v4
         with:
           name: neurocim-${{ matrix.flavor }}
