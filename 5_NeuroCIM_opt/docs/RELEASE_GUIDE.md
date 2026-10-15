@@ -1,42 +1,51 @@
 # Windows 发布说明
 
-## 发布形式
+## 用户下载与授权
 
-项目采用 PyInstaller one-folder 方式生成 Windows x64 免安装包。发布包包含 PyTorch、CUDA、PySide6、NeuroSim、模型 checkpoint、数据集和器件测量 CSV，运行端无需安装 Python。
+用户在 [NeuroCIM Access](https://fitzet.github.io/NeuroCIM-Access/) 使用 GitHub 账号提交申请。管理员为 Issue 添加 `approved` 标签后，自动化流程会向该账号发送私有 `NeuroCIM-Distribution` 仓库的只读邀请。用户接受邀请并运行公开的 `NeuroCIM-Installer.exe` 后，引导程序完成 GitHub 设备登录、NVIDIA GPU 检测、版本选择、分卷下载、SHA-256 校验和安装。
 
-最终产物位于：
+程序按当前用户安装到 `%LOCALAPPDATA%\Programs\NeuroCIM`，不要求管理员权限。运行输出默认写入 `%LOCALAPPDATA%\NeuroCIM\outputs`。
 
-```text
-release/NeuroCIM-Windows-x64/
-release/NeuroCIM-Windows-x64.zip
-release/SHA256SUMS.txt
-```
+## 发布内容
 
-解压 ZIP 后双击 `NeuroCIM/NeuroCIM.exe` 启动。不要只复制 EXE；程序需要同级 `_internal` 目录以及发布包根目录中的 `3_models`、`data` 和 `0_data`。
+每个正式版本在私有分发仓库中同时提供：
 
-## 内置资源
+- CPU 通用版安装包；
+- NVIDIA GPU 版安装包；
+- `update-manifest.json`，记录各分卷的名称、大小和 SHA-256；
+- LeNet-5、BNN、ResNet-20、TinyTransformer 和 GPT-2 的 checkpoint；
+- MNIST、CIFAR-10、五组器件 CSV 和 NeuroSim 运行文件。
 
-完整包包含 LeNet-5、BNN、ResNet-20、TinyTransformer 和 GPT-2 Small 的 checkpoint；包含 MNIST、CIFAR-10 的完整训练集和测试集；包含五组器件乘法测量 CSV。首次启动即可执行误差拟合，随后选择网络进行推理或误差感知训练。
+Inno Setup 把大型安装包切分为一个 `.exe` 和若干 `.bin`，单个文件不超过 GitHub Release 的资产限制。引导程序和软件内更新器会下载同一版本的全部文件，逐个验证后再运行安装器。
 
-## 构建
+## 自动发布
+
+在源代码仓库推送形如 `v1.0.0` 的标签后，`.github/workflows/windows-release.yml` 会：
+
+1. 分别安装 CPU 与 CUDA 版 PyTorch；
+2. 从私有分发仓库取得经过认证的运行资源；
+3. 执行测试、冻结检查和资源完整性检查；
+4. 构建 CPU/GPU 两套当前用户安装包；
+5. 合并更新清单并发布到私有分发仓库；
+6. 构建公开引导程序并发布到访问门户仓库。
+
+源代码仓库需要以下 Actions secrets：
+
+- `NEUROCIM_GITHUB_CLIENT_ID`：启用 Device Flow 的 GitHub OAuth App 客户端 ID；
+- `DISTRIBUTION_TOKEN`：仅允许写入 `NeuroCIM-Distribution` Releases/Contents 的细粒度令牌；
+- `ACCESS_RELEASE_TOKEN`：仅允许写入 `NeuroCIM-Access` Releases/Contents 的细粒度令牌。
+
+访问门户仓库还需要 `DISTRIBUTION_ADMIN_TOKEN`，其权限仅限管理 `NeuroCIM-Distribution` 的协作者。
+
+## 本地构建
 
 在 `5_NeuroCIM_opt` 目录执行：
 
 ```powershell
-python -m pip install -r packaging/requirements-build.txt
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_release.ps1
+./scripts/build_installer.ps1 -Flavor GPU -Version 1.0.0 -ClientId <OAuth客户端ID>
+./scripts/build_bootstrapper.ps1 -ClientId <OAuth客户端ID>
 ```
 
-构建脚本使用固定的 `release/NeuroCIM-Windows-x64` 目录，不创建按版本复制的源码目录。临时文件位于 `release/.build`，构建结束后删除。
+构建脚本会临时把公开 OAuth Client ID 写入冻结程序，并在成功或失败后恢复源文件，因此不会把本地测试配置遗留在代码树中。
 
-## 验收
-
-构建过程会检查：
-
-1. 五个网络模型及其 checkpoint、tokenizer 和辅助参数；
-2. MNIST 70,000 个样本和 CIFAR-10 60,000 个样本的文件结构；
-3. 至少五份器件测量 CSV；
-4. 冻结版 GUI 能够启动并生成截图；
-5. ZIP64 归档完整性以及 EXE、ZIP 的 SHA-256。
-
-NeuroSim 使用 CC BY-NC 4.0。第三方模型与数据集说明保存在 `THIRD_PARTY_NOTICES.md` 和 `licenses` 目录。
+NeuroSim 使用 CC BY-NC 4.0。第三方模型和数据集说明保存在 `THIRD_PARTY_NOTICES.md` 与 `licenses` 目录。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -112,5 +113,21 @@ class InstallerWindow(tk.Tk):
             messagebox.showerror("NeuroCIM安装", message)
 
 
+def _release_smoke() -> int:
+    output = os.environ.get("NEUROCIM_BOOTSTRAPPER_SMOKE")
+    if not output:
+        return 2
+    client = GitHubReleaseClient(token="smoke-test")
+    if not client.client_id:
+        return 3
+    Path(output).write_text(
+        f"ok:client_id_configured;flavor={installed_flavor(Path.cwd())}\n",
+        encoding="utf-8",
+    )
+    return 0
+
+
 if __name__ == "__main__":
+    if "--release-smoke" in sys.argv:
+        raise SystemExit(_release_smoke())
     InstallerWindow().mainloop()

@@ -53,6 +53,43 @@ def test_latest_update_selects_matching_flavor(monkeypatch: pytest.MonkeyPatch) 
     assert update.files == ((update.installer, "a" * 64),)
 
 
+def test_latest_update_selects_all_spanned_installer_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GitHubReleaseClient(token="test-token")
+    release = {
+        "tag_name": "v1.2.0",
+        "body": "notes",
+        "assets": [
+            {"name": "update-manifest.json", "url": "manifest", "size": 10},
+            {"name": "NeuroCIM-Setup-GPU-1.2.0-1.bin", "url": "bin-1", "size": 30},
+            {"name": "NeuroCIM-Setup-GPU-1.2.0.exe", "url": "setup", "size": 20},
+        ],
+    }
+    manifest = {
+        "flavors": {
+            "gpu": {
+                "files": [
+                    {"asset": "NeuroCIM-Setup-GPU-1.2.0-1.bin", "sha256": "b" * 64},
+                    {"asset": "NeuroCIM-Setup-GPU-1.2.0.exe", "sha256": "a" * 64},
+                ]
+            }
+        }
+    }
+
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: json.dumps(release).encode())
+    monkeypatch.setattr(client, "download_bytes", lambda _asset: json.dumps(manifest).encode())
+
+    update = client.latest_update(flavor="gpu", current="1.0.0")
+
+    assert update is not None
+    assert update.installer.name == "NeuroCIM-Setup-GPU-1.2.0.exe"
+    assert [asset.name for asset, _checksum in update.files] == [
+        "NeuroCIM-Setup-GPU-1.2.0-1.bin",
+        "NeuroCIM-Setup-GPU-1.2.0.exe",
+    ]
+
+
 def test_latest_update_requires_login() -> None:
     client = GitHubReleaseClient(token=None)
     client.token = None

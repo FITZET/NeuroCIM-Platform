@@ -18,12 +18,12 @@ AppVersion={#AppVersion}
 AppVerName=NeuroCIM {#AppVersion} ({#BuildFlavor})
 AppPublisher=FITZET
 AppPublisherURL=https://github.com/FITZET
-DefaultDirName={autopf}\NeuroCIM
+DefaultDirName={localappdata}\Programs\NeuroCIM
 DefaultGroupName=NeuroCIM
 UninstallDisplayIcon={app}\NeuroCIM\NeuroCIM.exe
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 OutputDir={#OutputRoot}
 OutputBaseFilename=NeuroCIM-Setup-{#BuildFlavor}-{#AppVersion}
 Compression=lzma2/ultra64
@@ -44,11 +44,10 @@ VersionInfoProductName=NeuroCIM
 VersionInfoProductVersion={#AppVersion}
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
 Source: "{#SourceRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -58,9 +57,9 @@ Name: "{autoprograms}\NeuroCIM"; Filename: "{app}\NeuroCIM\NeuroCIM.exe"
 Name: "{autodesktop}\NeuroCIM"; Filename: "{app}\NeuroCIM\NeuroCIM.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\NeuroCIM\NeuroCIM.exe"; Description: "启动 NeuroCIM"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\NeuroCIM\NeuroCIM.exe"; Description: "Launch NeuroCIM"; Flags: nowait postinstall skipifsilent
 
 [Registry]
-Root: HKLM; Subkey: "Software\FITZET\NeuroCIM"; ValueType: string; ValueName: "Version"; ValueData: "{#AppVersion}"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\FITZET\NeuroCIM"; ValueType: string; ValueName: "Flavor"; ValueData: "{#BuildFlavor}"
+Root: HKCU; Subkey: "Software\FITZET\NeuroCIM"; ValueType: string; ValueName: "Version"; ValueData: "{#AppVersion}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\FITZET\NeuroCIM"; ValueType: string; ValueName: "Flavor"; ValueData: "{#BuildFlavor}"
 

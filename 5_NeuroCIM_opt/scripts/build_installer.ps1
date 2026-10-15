@@ -17,22 +17,34 @@ $iss = Join-Path $platform "packaging\neurocim-installer.iss"
 if (-not $ClientId) {
     throw "Set NEUROCIM_GITHUB_CLIENT_ID or pass -ClientId so authenticated updates can work."
 }
-python (Join-Path $platform "scripts\configure_release.py") --client-id $ClientId
-if ($LASTEXITCODE -ne 0) { throw "Release configuration failed" }
+$releaseConfig = Join-Path $platform "neurocim_opt\release_config.py"
+$originalReleaseConfig = [System.IO.File]::ReadAllText($releaseConfig)
+try {
+    python (Join-Path $platform "scripts\configure_release.py") --client-id $ClientId
+    if ($LASTEXITCODE -ne 0) { throw "Release configuration failed" }
 
-$torchFlavor = python -c "import torch; print('GPU' if torch.version.cuda else 'CPU')"
-if ($LASTEXITCODE -ne 0) { throw "Cannot inspect the installed PyTorch build" }
-$torchFlavor = ($torchFlavor | Out-String).Trim()
-if ($torchFlavor -ne $Flavor) {
-    throw "This environment contains the $torchFlavor PyTorch build; use a $Flavor build environment."
+    $torchFlavor = python -c "import torch; print('GPU' if torch.version.cuda else 'CPU')"
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect the installed PyTorch build" }
+    $torchFlavor = ($torchFlavor | Out-String).Trim()
+    if ($torchFlavor -ne $Flavor) {
+        throw "This environment contains the $torchFlavor PyTorch build; use a $Flavor build environment."
+    }
+
+    $buildArgs = @{
+        SkipTests = [bool]$SkipTests
+        SkipZip = $true
+        ReuseFrozen = [bool]$ReuseFrozen
+    }
+    & (Join-Path $platform "scripts\build_release.ps1") @buildArgs
+    if ($LASTEXITCODE -ne 0) { throw "Portable release build failed" }
 }
-
-$buildArgs = @()
-if ($SkipTests) { $buildArgs += "-SkipTests" }
-if ($ReuseFrozen) { $buildArgs += "-ReuseFrozen" }
-$buildArgs += "-SkipZip"
-& (Join-Path $platform "scripts\build_release.ps1") @buildArgs
-if ($LASTEXITCODE -ne 0) { throw "Portable release build failed" }
+finally {
+    [System.IO.File]::WriteAllText(
+        $releaseConfig,
+        $originalReleaseConfig,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
 
 $manifestPath = Join-Path $portable "release_manifest.json"
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
@@ -42,6 +54,7 @@ $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -En
 
 $isccCandidates = @(
     (Get-Command iscc.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
 ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }

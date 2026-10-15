@@ -13,6 +13,38 @@ permissions:
   contents: read
 
 jobs:
+  bootstrapper:
+    runs-on: windows-latest
+    env:
+      NEUROCIM_GITHUB_CLIENT_ID: ${{ secrets.NEUROCIM_GITHUB_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Build public installer bootstrapper
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r 5_NeuroCIM_opt/packaging/requirements-build.txt "keyring>=24,<26"
+          Set-Location 5_NeuroCIM_opt
+          .\scripts\build_bootstrapper.ps1 -ClientId $env:NEUROCIM_GITHUB_CLIENT_ID
+      - name: Smoke-test frozen bootstrapper
+        shell: pwsh
+        run: |
+          $env:NEUROCIM_BOOTSTRAPPER_SMOKE = Join-Path $env:RUNNER_TEMP "bootstrapper-smoke.txt"
+          $process = Start-Process -FilePath "5_NeuroCIM_opt\release\bootstrapper\NeuroCIM-Installer.exe" `
+            -ArgumentList "--release-smoke" -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Bootstrapper smoke test failed: $($process.ExitCode)" }
+          $result = Get-Content -LiteralPath $env:NEUROCIM_BOOTSTRAPPER_SMOKE -Raw
+          if (-not $result.StartsWith("ok:")) { throw "Bootstrapper smoke result is invalid" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neurocim-bootstrapper
+          path: 5_NeuroCIM_opt/release/bootstrapper/NeuroCIM-Installer.exe
+          retention-days: 7
+
   build:
     strategy:
       fail-fast: false
@@ -90,7 +122,44 @@ jobs:
       - name: Publish private release
         shell: bash
         run: |
-          gh release create "v${NEUROCIM_VERSION}" --repo FITZET/NeuroCIM-Distribution \
-            --title "NeuroCIM ${NEUROCIM_VERSION}" \
-            --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts." \
-            artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*
+          tag="v${NEUROCIM_VERSION}"
+          if gh release view "$tag" --repo FITZET/NeuroCIM-Distribution >/dev/null 2>&1; then
+            gh release upload "$tag" --repo FITZET/NeuroCIM-Distribution --clobber \
+              artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*
+            gh release edit "$tag" --repo FITZET/NeuroCIM-Distribution \
+              --title "NeuroCIM ${NEUROCIM_VERSION}" \
+              --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts."
+          else
+            gh release create "$tag" --repo FITZET/NeuroCIM-Distribution \
+              --title "NeuroCIM ${NEUROCIM_VERSION}" \
+              --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts." \
+              artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*
+          fi
+
+  publish-bootstrapper:
+    needs: bootstrapper
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ACCESS_RELEASE_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: neurocim-bootstrapper
+          path: bootstrapper
+      - name: Resolve version
+        shell: bash
+        run: |
+          if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then version='${{ inputs.version }}'; else version='${{ github.ref_name }}'; version="${version#v}"; fi
+          echo "NEUROCIM_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Publish public bootstrapper
+        shell: bash
+        run: |
+          tag="v${NEUROCIM_VERSION}"
+          if gh release view "$tag" --repo FITZET/NeuroCIM-Access >/dev/null 2>&1; then
+            gh release upload "$tag" --repo FITZET/NeuroCIM-Access --clobber bootstrapper/NeuroCIM-Installer.exe
+          else
+            gh release create "$tag" --repo FITZET/NeuroCIM-Access \
+              --title "NeuroCIM 安装引导程序 ${NEUROCIM_VERSION}" \
+              --notes "登录已获准的 GitHub 账号后，自动检测硬件并安装 CPU 或 NVIDIA GPU 版本。" \
+              bootstrapper/NeuroCIM-Installer.exe
+          fi
