@@ -186,6 +186,11 @@ def test_real_single_sample_inference_offscreen() -> None:
     dataset_root = Path(widget.dataset_edit.text())
     if not (dataset_root / "MNIST").is_dir():
         pytest.skip("select or install an MNIST dataset root")
+    if not widget.run_button.isEnabled():
+        pytest.skip(
+            "single-sample inference requires fitted error-model resources: "
+            + widget.resource_status.text()
+        )
     widget.resize(900, 560)
     widget.show()
     widget.sample_index.setValue(0)
