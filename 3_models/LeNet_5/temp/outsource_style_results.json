@@ -1,0 +1,29 @@
+{
+  "assumptions": {
+    "input_quantization": "dynamic uint8 per sample",
+    "weight_quantization": "Wp/Wn shared uint8 scale per output channel",
+    "calibration": "per-output-channel mean/std, 20 train batches",
+    "sigma": 0.0,
+    "rho": 0.0,
+    "adc": "disabled because report does not state LeNet adc_bits"
+  },
+  "devices": {
+    "NMOS": {
+      "raw_accuracy": 0.9854,
+      "calibrated_accuracy": 0.9854
+    },
+    "CFET": {
+      "raw_accuracy": 0.8866,
+      "calibrated_accuracy": 0.9562
+    },
+    "AOS_1": {
+      "raw_accuracy": 0.9868,
+      "calibrated_accuracy": 0.981
+    },
+    "AOS_2": {
+      "raw_accuracy": 0.9815,
+      "calibrated_accuracy": 0.9827
+    }
+  },
+  "ideal_lut_accuracy": 0.9869
+}

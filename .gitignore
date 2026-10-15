@@ -1,0 +1,44 @@
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Generated experiments, builds and local toolchains
+**/outputs/
+**/output/
+**/release/
+**/dist/
+**/build/
+**/.build/
+**/.tools/
+*.log
+
+# Datasets and binary model weights are published as authenticated release assets
+/data/
+**/checkpoint/
+**/chekpoint/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+
+# Local application state
+*.tmp
+*.part
+*.zip
+*.7z
+*.exe
+*.dll
+*.pyd
+Thumbs.db
+.DS_Store
+
+# The access portal is maintained as its own Git repository
+/NeuroCIM_Access_Portal/

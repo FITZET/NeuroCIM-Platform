@@ -1,0 +1,613 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import asdict, dataclass
+import hashlib
+import json
+from pathlib import Path
+import sys
+from time import perf_counter
+from typing import Callable
+
+import torch
+from torch import nn
+
+from .paths import data_root
+
+
+class TrainingCancelled(RuntimeError):
+    """Raised after a cooperative cancellation request."""
+
+
+@dataclass(frozen=True)
+class TrainingRequest:
+    # Keep the historical positional fields first for existing GUI callers.
+    project_root: Path
+    error_model_path: Path
+    output_dir: Path
+    error_strength: float = 1.0
+    epochs: int = 1
+    batch_size: int = 128
+    device: str = "auto"
+    dataset_root: Path | None = None
+    learning_rate: float = 1e-4
+    model_id: str = "lenet5-mnist"
+    checkpoint_path: Path | None = None
+    auxiliary_path: Path | None = None
+    seed: int = 42
+    # Explicit smoke-run limits. None always means a complete dataset pass.
+    max_train_batches: int | None = None
+    max_eval_batches: int | None = None
+
+
+@dataclass(frozen=True)
+class TrainingOutcome:
+    checkpoint_path: str
+    history_path: str
+    result_path: str
+    output_dir: str
+    device: str
+    elapsed_seconds: float
+    history: tuple[dict, ...]
+    evaluations: dict
+    weight_update: dict
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TrainingResources:
+    model_id: str
+    dataset_name: str
+    model_root: Path
+    checkpoint: Path
+    auxiliary: Path | None
+    error_model: Path
+    dataset_root: Path
+    device: torch.device
+
+
+ProgressCallback = Callable[[int, str, dict | None], None]
+CancelCallback = Callable[[], bool]
+
+TINYTRANSFORMER_TRAIN_BATCH_LIMIT = 128
+TINYTRANSFORMER_EVAL_BATCH_LIMIT = 256
+TINYTRANSFORMER_FINETUNE_MODULES = (
+    "classifier.attention_pool",
+    "classifier.fc",
+)
+
+
+_MODEL_ALIASES = {
+    "lenet5": "lenet5-mnist", "lenet-5": "lenet5-mnist",
+    "lenet5_mnist": "lenet5-mnist", "lenet5-mnist": "lenet5-mnist",
+    "bnn": "bnn-mnist", "bnn_mnist": "bnn-mnist", "bnn-mnist": "bnn-mnist",
+    "resnet20": "resnet20-cifar10", "resnet-20": "resnet20-cifar10",
+    "resnet20_cifar10": "resnet20-cifar10", "resnet20-cifar10": "resnet20-cifar10",
+    "tinytransformer": "tinytransformer-cifar10", "tiny-transformer": "tinytransformer-cifar10",
+    "cct": "tinytransformer-cifar10", "cct-7": "tinytransformer-cifar10",
+    "tinytransformer-cifar10": "tinytransformer-cifar10",
+}
+
+
+def canonical_model_id(value: str) -> str:
+    try:
+        return _MODEL_ALIASES[value.strip().lower()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported training model {value!r}; choose LeNet-5, BNN, ResNet-20, or TinyTransformer"
+        ) from exc
+
+
+def _checkpoint_state(path: Path) -> dict[str, torch.Tensor]:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        # The trusted bundled BNN checkpoint contains NumPy RNG state, which
+        # some PyTorch safe loaders cannot decode.
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Checkpoint must contain a state dictionary: {path}")
+    state = payload.get("best_model_state_dict", payload.get("model_state_dict", payload))
+    if not isinstance(state, dict) or not state or not all(torch.is_tensor(v) for v in state.values()):
+        raise ValueError(f"Checkpoint has no valid model state dictionary: {path}")
+    return state
+
+
+def _state_digest(state: dict[str, torch.Tensor]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        digest.update(name.encode("utf-8"))
+        digest.update(state[name].detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _dataset_present(dataset: Path, name: str) -> bool:
+    if name == "mnist":
+        raw = dataset / "MNIST" / "raw"
+        return raw.is_dir() and any(raw.glob("*-images-idx*-ubyte*"))
+    folder = dataset / "cifar-10-batches-py"
+    return folder.is_dir() and (folder / "test_batch").is_file()
+
+
+def _normalise_dataset_root(dataset: Path, name: str) -> Path:
+    """Accept either a torchvision root or a selected raw folder/file."""
+    dataset = dataset.expanduser().resolve()
+    if name == "cifar10":
+        if dataset.is_file() and dataset.name in {"test_batch", "data_batch_1"}:
+            return dataset.parent.parent
+        if dataset.name == "cifar-10-batches-py":
+            return dataset.parent
+    if name == "mnist":
+        if dataset.is_file() and "ubyte" in dataset.name:
+            dataset = dataset.parent
+        if dataset.name.lower() == "raw" and dataset.parent.name == "MNIST":
+            return dataset.parent.parent
+        if dataset.name == "MNIST":
+            return dataset.parent
+    return dataset
+
+
+def _configure_tinytransformer_head_finetuning(model: nn.Module) -> tuple[str, ...]:
+    """Freeze CCT's backbone and leave sequence-pooling/classification heads trainable."""
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    modules = dict(model.named_modules())
+    missing = [name for name in TINYTRANSFORMER_FINETUNE_MODULES if name not in modules]
+    if missing:
+        raise RuntimeError(f"TinyTransformer fine-tuning modules are missing: {missing}")
+    for name in TINYTRANSFORMER_FINETUNE_MODULES:
+        for parameter in modules[name].parameters():
+            parameter.requires_grad_(True)
+    return tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+
+
+class ErrorAwareTrainingService:
+    """Error-aware training for all registered platform classifiers.
+
+    The selected fitted LUT drives an exact signed positive/negative
+    differential forward pass. Floating surrogate gradients (STE) make that
+    hardware-aware path trainable.
+    """
+
+    def validate(self, request: TrainingRequest) -> TrainingResources:
+        if not 0.0 <= request.error_strength <= 1.0:
+            raise ValueError("lambda must be in [0, 1]")
+        if request.epochs < 1:
+            raise ValueError("epochs must be at least 1")
+        if request.batch_size < 1:
+            raise ValueError("batch size must be at least 1")
+        if request.learning_rate <= 0:
+            raise ValueError("learning rate must be positive")
+        if request.max_train_batches is not None and request.max_train_batches < 1:
+            raise ValueError("max_train_batches must be at least 1")
+        if request.max_eval_batches is not None and request.max_eval_batches < 1:
+            raise ValueError("max_eval_batches must be at least 1")
+        if request.device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("device must be auto, cpu, or cuda")
+        if request.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was selected but is unavailable")
+        device = torch.device(
+            "cuda" if request.device == "auto" and torch.cuda.is_available() else
+            "cpu" if request.device == "auto" else request.device
+        )
+        model_id = canonical_model_id(request.model_id)
+        root = Path(request.project_root).expanduser().resolve()
+        defaults = {
+            "lenet5-mnist": ("mnist", root / "3_models/LeNet_5",
+                              root / "3_models/LeNet_5/chekpoint/lenet5_float.pt",
+                              root / "3_models/LeNet_5/chekpoint/quantization.json"),
+            "bnn-mnist": ("mnist", root / "3_models/BNN",
+                           root / "3_models/BNN/checkpoint/bnn_mnist.pt", None),
+            "resnet20-cifar10": ("cifar10", root / "3_models/Resnet20",
+                                  root / "3_models/Resnet20/checkpoint/resnet20_cifar10.pt",
+                                  root / "3_models/Resnet20/output/formal/input_scales.json"),
+            "tinytransformer-cifar10": (
+                "cifar10", root / "3_models/TinyTransformer",
+                root / "3_models/TinyTransformer/checkpoint/cct_7_3x1_32_cifar10.pth",
+                root / "3_models/TinyTransformer/checkpoint/input_scales.json",
+            ),
+        }
+        dataset_name, model_root, default_checkpoint, default_auxiliary = defaults[model_id]
+        checkpoint = Path(request.checkpoint_path or default_checkpoint).expanduser().resolve()
+        auxiliary_value = request.auxiliary_path if request.auxiliary_path is not None else default_auxiliary
+        auxiliary = Path(auxiliary_value).expanduser().resolve() if auxiliary_value else None
+        error_model = Path(request.error_model_path).expanduser().resolve()
+        required = [checkpoint, error_model]
+        if model_id in {"lenet5-mnist", "resnet20-cifar10", "tinytransformer-cifar10"}:
+            required.append(auxiliary)
+        missing = [str(path or "<auxiliary parameter file>") for path in required if path is None or not path.is_file()]
+        if not model_root.is_dir():
+            missing.append(str(model_root))
+        if missing:
+            raise FileNotFoundError(
+                f"Required training resources are missing for {model_id}:\n" + "\n".join(missing)
+            )
+        dataset = _normalise_dataset_root(
+            Path(request.dataset_root) if request.dataset_root else data_root(dataset_name),
+            dataset_name,
+        )
+        if not _dataset_present(dataset, dataset_name):
+            expected = dataset / ("MNIST/raw" if dataset_name == "mnist" else "cifar-10-batches-py/test_batch")
+            raise FileNotFoundError(
+                f"{dataset_name.upper()} is unavailable under {dataset}; expected {expected}"
+            )
+        return TrainingResources(
+            model_id, dataset_name, model_root, checkpoint, auxiliary,
+            error_model, dataset, device,
+        )
+
+    @staticmethod
+    def _cancelled(cancel: CancelCallback | None) -> None:
+        if cancel is not None and cancel():
+            raise TrainingCancelled("Training cancelled by user")
+
+    @staticmethod
+    def _add_import_root(path: Path) -> None:
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+    def _prepare(self, resources: TrainingResources, request: TrainingRequest):
+        """Build loaders and model conversion functions for one registered model."""
+        self._add_import_root(resources.model_root)
+        state = _checkpoint_state(resources.checkpoint)
+        if resources.model_id == "tinytransformer-cifar10":
+            train_batch_size = min(request.batch_size, TINYTRANSFORMER_TRAIN_BATCH_LIMIT)
+            eval_batch_size = min(
+                max(request.batch_size, TINYTRANSFORMER_TRAIN_BATCH_LIMIT),
+                TINYTRANSFORMER_EVAL_BATCH_LIMIT,
+            )
+        else:
+            train_batch_size = request.batch_size
+            # Differential LUT layers use substantially more temporary memory than
+            # ordinary floating inference. Keep evaluation at or below the
+            # requested batch size so lowering a job's batch size also resolves
+            # CUDA OOM during the before/after full-test passes.
+            eval_batch_size = min(request.batch_size, 128)
+
+        if resources.model_id == "lenet5-mnist":
+            from lenet5.config import ExperimentConfig
+            from lenet5.data import create_mnist_train_val_test_loaders
+            from lenet5.differential import configure_differential_model
+            from lenet5.model import LeNet5
+            from lenet5.quantization import load_quantization_parameters
+
+            config = ExperimentConfig(
+                dataset_root=resources.dataset_root, output_dir=Path(request.output_dir),
+                batch_size=request.batch_size, eval_batch_size=eval_batch_size,
+                epochs=request.epochs, learning_rate=request.learning_rate,
+                device=str(resources.device), num_workers=0,
+            )
+            loaders = create_mnist_train_val_test_loaders(config)
+            parameters = load_quantization_parameters(resources.auxiliary)
+
+            def base():
+                model = LeNet5()
+                model.load_state_dict(state)
+                return model
+
+            def differential(model, lut, ste):
+                return configure_differential_model(model, parameters, lut, ste=ste)
+
+            return loaders, base, differential, state
+
+        if resources.model_id == "bnn-mnist":
+            from bnn.data import create_loaders
+            from bnn.differential import collect_input_scales
+            from bnn.model import BinaryMNIST
+            from .layers import adapt_module
+
+            loaders = create_loaders(
+                resources.dataset_root, request.batch_size, eval_batch_size,
+                request.seed, num_workers=0,
+            )
+
+            def base():
+                model = BinaryMNIST()
+                model.load_state_dict(state)
+                return model
+
+            scales = collect_input_scales(
+                base().frozen(), loaders[1], str(resources.device), batches=1
+            )
+
+            def differential(model, lut, ste):
+                # The frozen deployment graph supplies actual +/-1 BNN weights;
+                # converted MAC parameters remain trainable via layer STE.
+                graph = model.frozen() if hasattr(model, "frozen") else model
+                return adapt_module(
+                    graph, lut=torch.as_tensor(lut), input_scales=scales, ste=ste
+                )
+
+            return loaders, base, differential, state
+
+        if resources.model_id == "tinytransformer-cifar10":
+            from tiny_transformer import cct_7_3x1_32 as model_factory
+            from tiny_transformer.data import create_cifar10_loaders
+            from tiny_transformer.engine import differential_head_copy as differential_copy
+        else:
+            from resnet20.data import create_cifar10_loaders
+            from resnet20.engine import differential_copy
+            from resnet20.model import resnet20 as model_factory
+
+        loaders = create_cifar10_loaders(
+            resources.dataset_root, batch_size=train_batch_size,
+            eval_batch_size=eval_batch_size, seed=request.seed,
+            num_workers=0, download=False,
+        )
+        scales = json.loads(resources.auxiliary.read_text(encoding="utf-8"))
+        if not isinstance(scales, dict) or not scales:
+            raise ValueError(
+                f"{resources.model_id} input scales must be a non-empty object: {resources.auxiliary}"
+            )
+        scales = {str(key): float(value) for key, value in scales.items()}
+
+        def base():
+            model = model_factory()
+            model.load_state_dict(state)
+            if resources.model_id == "tinytransformer-cifar10":
+                _configure_tinytransformer_head_finetuning(model)
+            return model
+
+        def differential(model, lut, ste):
+            converted = differential_copy(model, lut, scales, ste=ste)
+            if resources.model_id == "tinytransformer-cifar10":
+                _configure_tinytransformer_head_finetuning(converted)
+            return converted
+
+        return loaders, base, differential, state
+
+    def run(
+        self, request: TrainingRequest, *, progress: ProgressCallback | None = None,
+        cancel: CancelCallback | None = None,
+    ) -> TrainingOutcome:
+        notify = progress or (lambda _percent, _message, _metrics=None: None)
+        resources = self.validate(request)
+        self._cancelled(cancel)
+        from .error_model import HardwareErrorModel
+
+        started = perf_counter()
+        output = Path(request.output_dir).expanduser().resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        loaders, base, differential, initial_state = self._prepare(resources, request)
+        train_loader, validation_loader, test_loader = loaders
+        error_model = HardwareErrorModel.load(resources.error_model)
+        ideal_lut = error_model.effective_lut(0.0)
+        device_lut = error_model.effective_lut(request.error_strength)
+
+        notify(1, f"Evaluating {resources.model_id} baseline", None)
+        def evaluate_with_progress(
+            model, loader, mode: str, label: str, start_percent: int, end_percent: int,
+        ):
+            def report(done: int, total: int) -> None:
+                percent = start_percent + round((end_percent - start_percent) * done / max(total, 1))
+                notify(percent, f"Evaluating {label}: {done}/{total} batches", None)
+            return self._evaluate(
+                model, loader, resources.device, mode, cancel, request.max_eval_batches,
+                batch_progress=report,
+            )
+
+        before = {
+            "float": evaluate_with_progress(base(), test_loader, "float", "baseline float", 1, 3),
+            "ideal_differential": evaluate_with_progress(
+                differential(base(), ideal_lut, False), test_loader, "ideal_differential",
+                "baseline ideal differential", 3, 6,
+            ),
+            "device_differential": evaluate_with_progress(
+                differential(base(), device_lut, False), test_loader, "device_differential",
+                "baseline device differential", 6, 9,
+            ),
+        }
+
+        model = differential(base(), device_lut, True).to(resources.device)
+        training_initial_state = deepcopy(model.state_dict())
+        trainable_names = {
+            name for name, parameter in model.named_parameters() if parameter.requires_grad
+        }
+        if not trainable_names:
+            raise RuntimeError(f"{resources.model_id} has no trainable parameters")
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=request.learning_rate,
+        )
+        history: list[dict] = []
+        best_accuracy = -1.0
+        best_state: dict[str, torch.Tensor] = {}
+        per_epoch = len(train_loader)
+        if request.max_train_batches is not None:
+            per_epoch = min(per_epoch, request.max_train_batches)
+        total_batches = per_epoch * request.epochs
+        completed_batches = 0
+        for epoch in range(request.epochs):
+            model.train()
+            total_loss = 0.0
+            correct = samples = 0
+            for batch_index, (inputs, targets) in enumerate(train_loader):
+                if request.max_train_batches is not None and batch_index >= request.max_train_batches:
+                    break
+                self._cancelled(cancel)
+                inputs = inputs.to(resources.device)
+                targets = targets.to(resources.device)
+                optimizer.zero_grad(set_to_none=True)
+                logits = model(inputs)
+                loss = criterion(logits, targets)
+                if not torch.isfinite(loss):
+                    raise RuntimeError("Non-finite loss in error-aware training")
+                loss.backward()
+                optimizer.step()
+                count = targets.numel()
+                total_loss += float(loss.detach()) * count
+                correct += int((logits.argmax(1) == targets).sum())
+                samples += count
+                completed_batches += 1
+                if completed_batches == 1 or completed_batches % 20 == 0:
+                    notify(
+                        10 + round(65 * completed_batches / max(total_batches, 1)),
+                        f"Epoch {epoch + 1}/{request.epochs}: {completed_batches}/{total_batches} batches",
+                        {"train_loss": total_loss / samples,
+                         "train_accuracy": correct / samples, "samples": samples},
+                    )
+            if samples == 0:
+                raise RuntimeError("No training samples were processed")
+            validation = self._evaluate(
+                model, validation_loader, resources.device, "device_differential", cancel,
+                request.max_eval_batches,
+                batch_progress=lambda done, total, current=epoch + 1: notify(
+                    75, f"Epoch {current}/{request.epochs} validation: {done}/{total} batches", None
+                ),
+            )
+            record = {
+                "epoch": epoch + 1, "train_loss": total_loss / samples,
+                "train_accuracy": correct / samples,
+                "validation_loss": validation["loss"],
+                "validation_accuracy": validation["accuracy"],
+                "train_samples": samples, "validation_samples": validation["samples"],
+            }
+            history.append(record)
+            notify(75, f"Epoch {epoch + 1} complete", record)
+            if validation["accuracy"] > best_accuracy:
+                best_accuracy = validation["accuracy"]
+                best_state = deepcopy(model.state_dict())
+
+        self._cancelled(cancel)
+        notify(78, f"Evaluating trained {resources.model_id} weights", None)
+
+        def trained(lut=None):
+            trained_model = base()
+            trained_model.load_state_dict(best_state, strict=False)
+            if lut is not None:
+                trained_model = differential(trained_model, lut, False)
+                trained_model.load_state_dict(best_state, strict=False)
+            return trained_model
+
+        after = {
+            "float": evaluate_with_progress(
+                trained(), test_loader, "float", "trained float", 78, 85,
+            ),
+            "ideal_differential": evaluate_with_progress(
+                trained(ideal_lut), test_loader, "ideal_differential",
+                "trained ideal differential", 85, 92,
+            ),
+            "device_differential": evaluate_with_progress(
+                trained(device_lut), test_loader, "device_differential",
+                "trained device differential", 92, 99,
+            ),
+        }
+        final_parameters = {
+            name: value for name, value in best_state.items()
+            if name in training_initial_state and name in trainable_names
+        }
+        delta_sq = 0.0
+        max_delta = 0.0
+        changed = 0
+        for name, initial in training_initial_state.items():
+            if name not in final_parameters or name not in trainable_names or not torch.is_floating_point(initial):
+                continue
+            delta = final_parameters[name].detach().cpu() - initial.detach().cpu()
+            delta_sq += float(torch.sum(delta.double().square()))
+            maximum = float(delta.abs().max())
+            max_delta = max(max_delta, maximum)
+            changed += int(maximum > 0)
+        weight_update = {
+            "source_checkpoint_sha256": _state_digest(initial_state),
+            "initial_sha256": _state_digest({
+                name: value for name, value in training_initial_state.items()
+                if name in trainable_names
+            }),
+            "trained_sha256": _state_digest(final_parameters),
+            "l2_delta": delta_sq ** 0.5, "max_abs_delta": max_delta,
+            "changed_parameter_tensors": changed,
+        }
+
+        checkpoint_path = output / "eat_checkpoint.pt"
+        history_path = output / "history.json"
+        result_path = output / "training_result.json"
+        torch.save({
+            "model_state_dict": model.state_dict(), "best_model_state_dict": best_state,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "metadata": {
+                "training": "signed differential device-LUT forward with float STE backward",
+                "model_id": resources.model_id, "dataset": resources.dataset_name,
+                "lambda": request.error_strength,
+                "error_model": str(resources.error_model), "history": history,
+            },
+        }, checkpoint_path)
+        history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+        request_payload = asdict(request)
+        for key, value in list(request_payload.items()):
+            if isinstance(value, Path):
+                request_payload[key] = str(value)
+        payload = {
+            "status": "completed", "model_id": resources.model_id,
+            "dataset": resources.dataset_name,
+            "formal_evaluation": request.max_eval_batches is None,
+            "config": request_payload,
+            "resolved_resources": {
+                "checkpoint": str(resources.checkpoint),
+                "auxiliary": str(resources.auxiliary) if resources.auxiliary else None,
+                "error_model": str(resources.error_model),
+                "dataset_root": str(resources.dataset_root),
+            },
+            "training_strategy": {
+                "scope": (
+                    "frozen_float_backbone_with_differential_sequence_pooling_and_classifier_heads"
+                    if resources.model_id == "tinytransformer-cifar10" else "full_network"
+                ),
+                "trainable_parameter_names": sorted(trainable_names),
+                "requested_batch_size": request.batch_size,
+                "effective_train_batch_size": train_loader.batch_size,
+                "effective_eval_batch_size": test_loader.batch_size,
+            },
+            "device": str(resources.device), "elapsed_seconds": perf_counter() - started,
+            "history": history, "evaluations": {"before": before, "after": after},
+            "weight_update": weight_update,
+            "artifacts": {"checkpoint": str(checkpoint_path), "history": str(history_path)},
+        }
+        result_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        notify(100, "Training and evaluation completed", history[-1])
+        return TrainingOutcome(
+            str(checkpoint_path), str(history_path), str(result_path), str(output),
+            str(resources.device), payload["elapsed_seconds"], tuple(history),
+            payload["evaluations"], weight_update,
+        )
+
+    def _evaluate(
+        self, model, loader, device, mode: str, cancel: CancelCallback | None,
+        max_batches: int | None = None,
+        batch_progress: Callable[[int, int], None] | None = None,
+    ) -> dict:
+        model.eval().to(device)
+        criterion = nn.CrossEntropyLoss(reduction="sum")
+        loss = 0.0
+        correct = samples = 0
+        confusion = torch.zeros((10, 10), dtype=torch.int64)
+        total_batches = len(loader) if max_batches is None else min(len(loader), max_batches)
+        with torch.inference_mode():
+            for batch_index, (inputs, targets) in enumerate(loader):
+                if max_batches is not None and batch_index >= max_batches:
+                    break
+                self._cancelled(cancel)
+                inputs, targets = inputs.to(device), targets.to(device)
+                logits = model(inputs)
+                loss += float(criterion(logits, targets))
+                predictions = logits.argmax(1)
+                correct += int((predictions == targets).sum())
+                indices = (targets * 10 + predictions).detach().cpu()
+                confusion += torch.bincount(indices, minlength=100).reshape(10, 10)
+                samples += targets.numel()
+                completed = batch_index + 1
+                if batch_progress and (completed == 1 or completed % 10 == 0 or completed == total_batches):
+                    batch_progress(completed, total_batches)
+        if samples == 0:
+            raise RuntimeError("No evaluation samples were processed")
+        class_totals = confusion.sum(1)
+        return {
+            "mode": mode, "loss": loss / samples, "accuracy": correct / samples,
+            "correct": correct, "samples": samples,
+            "per_class_accuracy": (
+                confusion.diag().float() / class_totals.clamp_min(1)
+            ).tolist(),
+            "confusion_matrix": confusion.tolist(),
+        }

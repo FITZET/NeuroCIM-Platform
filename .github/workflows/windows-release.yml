@@ -1,0 +1,95 @@
+name: Build private Windows release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: CPU
+            slug: cpu
+          - flavor: GPU
+            slug: gpu
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.DISTRIBUTION_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}'.TrimStart('v') }
+          "NEUROCIM_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Install runtime dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r 5_NeuroCIM_opt/packaging/requirements-runtime.txt
+          if ('${{ matrix.flavor }}' -eq 'CPU') {
+            python -m pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cpu
+          } else {
+            python -m pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
+          }
+          python -m pip install -r 5_NeuroCIM_opt/packaging/requirements-build.txt pytest==7.4.0
+          choco install innosetup -y --no-progress
+      - name: Download authenticated runtime resources
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force runtime-assets | Out-Null
+          gh release download runtime-assets-v1 --repo FITZET/NeuroCIM-Distribution --pattern 'runtime-assets.zip' --dir runtime-assets
+          Expand-Archive runtime-assets/runtime-assets.zip -DestinationPath . -Force
+      - name: Build ${{ matrix.flavor }} installer
+        shell: pwsh
+        working-directory: 5_NeuroCIM_opt
+        run: .\scripts\build_installer.ps1 -Flavor ${{ matrix.flavor }} -Version $env:NEUROCIM_VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neurocim-${{ matrix.flavor }}
+          path: 5_NeuroCIM_opt/release/artifacts/${{ matrix.slug }}/*
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.DISTRIBUTION_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Resolve version
+        shell: bash
+        run: |
+          if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then version='${{ inputs.version }}'; else version='${{ github.ref_name }}'; version="${version#v}"; fi
+          echo "NEUROCIM_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Merge update manifests
+        run: |
+          python 5_NeuroCIM_opt/scripts/merge_update_manifests.py \
+            --output artifacts/update-manifest.json \
+            artifacts/neurocim-CPU/update-manifest.json \
+            artifacts/neurocim-GPU/update-manifest.json
+          rm artifacts/neurocim-CPU/update-manifest.json artifacts/neurocim-GPU/update-manifest.json
+      - name: Publish private release
+        shell: bash
+        run: |
+          gh release create "v${NEUROCIM_VERSION}" --repo FITZET/NeuroCIM-Distribution \
+            --title "NeuroCIM ${NEUROCIM_VERSION}" \
+            --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts." \
+            artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*

@@ -1,0 +1,15 @@
+Upstream: https://github.com/neurosim/NeuroSim
+Branch: 2DInferenceV1.4
+Commit: 8a88abf85844c0e1ba17cc771ea535fff6040456
+
+--- a/Inference_pytorch/NeuroSIM/Param.cpp
++++ b/Inference_pytorch/NeuroSIM/Param.cpp
+@@
+- novelMapping = true;        // false: conventional mapping
++ novelMapping = false;       // false: conventional mapping
+
+Reason: the platform maps signed activation/weight branches as a general expanded
+matrix, including LeNet-5 5x5 kernels and fully-connected layers. Conventional
+mapping is the applicable general mapping path. The upstream default novel mapping
+exits during chip initialization on this Windows MinGW build, including for the
+upstream VGG8 network, before any weight/input trace is read.

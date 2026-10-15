@@ -1,0 +1,20 @@
+﻿{
+  "format_version": 1,
+  "source_roots": ["5_NeuroCIM_opt", "3_models/LeNet_5", "3_models/Resnet20"],
+  "include": [
+    "**/*.py", "**/*.ps1", "**/*.md", "**/*.txt", "**/*.json",
+    "5_NeuroCIM_opt/vendor/neurosim/**"
+  ],
+  "exclude": [
+    "**/.tools/**", "**/.venv/**", "**/outputs/**", "**/output/**",
+    "**/data/**", "**/datasets/**", "**/checkpoint/**", "**/checkpoints/**",
+    "**/chekpoint/**", "**/__pycache__/**", "**/.pytest_cache/**",
+    "**/*.pt", "**/*.pth", "**/*.ckpt", "**/*.onnx", "**/*.npz",
+    "**/*.csv", "**/*.xlsx", "**/*.exe", "**/*.dll"
+  ],
+  "notes": [
+    "Apply exclusions after includes; exclusions always win.",
+    "Do not package user datasets, device measurements, generated outputs, weights, or local toolchains.",
+    "Retain THIRD_PARTY_NOTICES.md and all upstream NeuroSim license material."
+  ]
+}

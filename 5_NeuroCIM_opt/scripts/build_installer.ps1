@@ -1,0 +1,57 @@
+param(
+    [ValidateSet("CPU", "GPU")]
+    [string]$Flavor,
+    [ValidatePattern("^\d+\.\d+\.\d+$")]
+    [string]$Version,
+    [switch]$SkipTests,
+    [switch]$ReuseFrozen
+)
+
+$ErrorActionPreference = "Stop"
+$platform = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$releaseRoot = Join-Path $platform "release"
+$portable = Join-Path $releaseRoot "NeuroCIM-Windows-x64"
+$artifactRoot = Join-Path $releaseRoot ("artifacts\" + $Flavor.ToLowerInvariant())
+$iss = Join-Path $platform "packaging\neurocim-installer.iss"
+
+$torchFlavor = python -c "import torch; print('GPU' if torch.version.cuda else 'CPU')"
+if ($LASTEXITCODE -ne 0) { throw "Cannot inspect the installed PyTorch build" }
+$torchFlavor = ($torchFlavor | Out-String).Trim()
+if ($torchFlavor -ne $Flavor) {
+    throw "This environment contains the $torchFlavor PyTorch build; use a $Flavor build environment."
+}
+
+$buildArgs = @()
+if ($SkipTests) { $buildArgs += "-SkipTests" }
+if ($ReuseFrozen) { $buildArgs += "-ReuseFrozen" }
+$buildArgs += "-SkipZip"
+& (Join-Path $platform "scripts\build_release.ps1") @buildArgs
+if ($LASTEXITCODE -ne 0) { throw "Portable release build failed" }
+
+$manifestPath = Join-Path $portable "release_manifest.json"
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$manifest | Add-Member -NotePropertyName version -NotePropertyValue $Version -Force
+$manifest | Add-Member -NotePropertyName flavor -NotePropertyValue $Flavor.ToLowerInvariant() -Force
+$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
+$isccCandidates = @(
+    (Get-Command iscc.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+    "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$iscc = $isccCandidates | Select-Object -First 1
+if (-not $iscc) {
+    throw "Inno Setup 6 is required. Install it with: winget install JRSoftware.InnoSetup"
+}
+
+New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+Get-ChildItem -LiteralPath $artifactRoot -File -ErrorAction SilentlyContinue | Remove-Item -Force
+& $iscc "/DAppVersion=$Version" "/DBuildFlavor=$Flavor" "/DSourceRoot=$portable" "/DOutputRoot=$artifactRoot" $iss
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed" }
+
+python (Join-Path $platform "scripts\generate_update_manifest.py") `
+    --version $Version --flavor $Flavor --artifact-dir $artifactRoot
+if ($LASTEXITCODE -ne 0) { throw "Update manifest generation failed" }
+
+Write-Output "Installer artifacts ready: $artifactRoot"
+

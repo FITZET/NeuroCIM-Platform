@@ -1,0 +1,167 @@
+param(
+    [switch]$SkipTests,
+    [switch]$SkipZip,
+    [switch]$ReuseFrozen
+)
+
+$ErrorActionPreference = "Stop"
+$platform = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$project = [System.IO.Path]::GetFullPath((Join-Path $platform ".."))
+$releaseRoot = [System.IO.Path]::GetFullPath((Join-Path $platform "release"))
+$portable = [System.IO.Path]::GetFullPath((Join-Path $releaseRoot "NeuroCIM-Windows-x64"))
+$buildRoot = [System.IO.Path]::GetFullPath((Join-Path $releaseRoot ".build"))
+$distRoot = Join-Path $buildRoot "dist"
+$workRoot = Join-Path $buildRoot "work"
+$spec = Join-Path $platform "packaging\neurocim.spec"
+
+foreach ($target in @($portable, $buildRoot)) {
+    if (-not $target.StartsWith($releaseRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe release target: $target"
+    }
+}
+
+if (-not $SkipTests) {
+    Push-Location $platform
+    try {
+        python -m pytest -q tests/test_gui_smoke.py tests/test_paths.py tests/test_model_registry.py
+        if ($LASTEXITCODE -ne 0) { throw "Release preflight tests failed" }
+    } finally {
+        Pop-Location
+    }
+}
+
+$appTarget = Join-Path $portable "NeuroCIM"
+if (-not $ReuseFrozen) {
+    if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable -Recurse -Force }
+    if (Test-Path -LiteralPath $buildRoot) { Remove-Item -LiteralPath $buildRoot -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $releaseRoot, $portable, $buildRoot | Out-Null
+
+    Push-Location $platform
+    try {
+        $previousQtApi = $env:QT_API
+        $env:QT_API = "pyside6"
+        python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workRoot $spec
+        if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
+    } finally {
+        $env:QT_API = $previousQtApi
+        Pop-Location
+    }
+
+    $builtApp = Join-Path $distRoot "NeuroCIM"
+    if (-not (Test-Path -LiteralPath (Join-Path $builtApp "NeuroCIM.exe"))) {
+        throw "PyInstaller output is missing NeuroCIM.exe"
+    }
+    Copy-Item -LiteralPath $builtApp -Destination $appTarget -Recurse
+} elseif (-not (Test-Path -LiteralPath (Join-Path $appTarget "NeuroCIM.exe"))) {
+    throw "Cannot reuse frozen application because NeuroCIM.exe is missing"
+}
+
+$neurosimTarget = Join-Path $appTarget "outputs\neurosim\bin"
+New-Item -ItemType Directory -Force -Path $neurosimTarget | Out-Null
+Copy-Item -LiteralPath (Join-Path $platform "outputs\neurosim\bin\neurosim.exe") -Destination $neurosimTarget
+$mingwBin = Join-Path $platform ".tools\mingw\Library\mingw-w64\bin"
+foreach ($dll in @("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll")) {
+    Copy-Item -LiteralPath (Join-Path $mingwBin $dll) -Destination $neurosimTarget
+}
+
+$resourceDirectories = @(
+    "3_models\LeNet_5\chekpoint",
+    "3_models\BNN\checkpoint",
+    "3_models\Resnet20\checkpoint",
+    "3_models\Resnet20\output\formal",
+    "3_models\TinyTransformer\checkpoint",
+    "3_models\GPT2\checkpoint\tokenizer",
+    "data\mnist",
+    "data\cifar10",
+    "0_data"
+)
+foreach ($relative in $resourceDirectories) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $portable $relative) | Out-Null
+}
+
+function Copy-ResourceTree {
+    param([string]$Source, [string]$Destination)
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "Required bundled resource directory is missing: $Source"
+    }
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File) {
+        $relative = $file.FullName.Substring($Source.Length).TrimStart('\')
+        $target = Join-Path $Destination $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+    }
+}
+
+Copy-ResourceTree (Join-Path $project "3_models\LeNet_5\chekpoint") (Join-Path $portable "3_models\LeNet_5\chekpoint")
+Copy-ResourceTree (Join-Path $project "3_models\BNN\checkpoint") (Join-Path $portable "3_models\BNN\checkpoint")
+Copy-ResourceTree (Join-Path $project "3_models\Resnet20\checkpoint") (Join-Path $portable "3_models\Resnet20\checkpoint")
+Copy-Item -LiteralPath (Join-Path $project "3_models\Resnet20\output\formal\input_scales.json") -Destination (Join-Path $portable "3_models\Resnet20\output\formal\input_scales.json") -Force
+Copy-ResourceTree (Join-Path $project "3_models\TinyTransformer\checkpoint") (Join-Path $portable "3_models\TinyTransformer\checkpoint")
+Copy-ResourceTree (Join-Path $project "3_models\GPT2\checkpoint") (Join-Path $portable "3_models\GPT2\checkpoint")
+Copy-ResourceTree (Join-Path $project "0_data") (Join-Path $portable "0_data")
+
+$mnistSource = Join-Path $project "data\mnist\MNIST\raw"
+$mnistTarget = Join-Path $portable "data\mnist\MNIST\raw"
+New-Item -ItemType Directory -Force -Path $mnistTarget | Out-Null
+foreach ($name in @("train-images-idx3-ubyte", "train-labels-idx1-ubyte", "t10k-images-idx3-ubyte", "t10k-labels-idx1-ubyte")) {
+    Copy-Item -LiteralPath (Join-Path $mnistSource $name) -Destination (Join-Path $mnistTarget $name) -Force
+}
+Copy-ResourceTree (Join-Path $project "data\cifar10\cifar-10-batches-py") (Join-Path $portable "data\cifar10\cifar-10-batches-py")
+
+python (Join-Path $platform "scripts\verify_release_resources.py") $portable
+if ($LASTEXITCODE -ne 0) { throw "Bundled resource verification failed" }
+
+$docsTarget = Join-Path $portable "docs"
+$licensesTarget = Join-Path $portable "licenses"
+New-Item -ItemType Directory -Force -Path $docsTarget, $licensesTarget | Out-Null
+foreach ($name in @("USER_MANUAL.md", "ENVIRONMENT_SETUP.md", "TECHNICAL_MANUAL.md", "RELEASE_GUIDE.md")) {
+    Copy-Item -LiteralPath (Join-Path $platform "docs\$name") -Destination $docsTarget
+}
+$resourceGuide = Get-ChildItem -LiteralPath (Join-Path $platform "packaging") -Filter "*.md" -File | Select-Object -First 1
+if ($null -eq $resourceGuide) { throw "External resource guide is missing" }
+Copy-Item -LiteralPath $resourceGuide.FullName -Destination $portable
+Copy-Item -LiteralPath (Join-Path $platform "THIRD_PARTY_NOTICES.md") -Destination $portable
+Copy-Item -LiteralPath (Join-Path $platform "vendor\neurosim\README.md") -Destination (Join-Path $licensesTarget "NeuroSim_README.md")
+Copy-Item -LiteralPath (Join-Path $project "3_models\TinyTransformer\LICENSE") -Destination (Join-Path $licensesTarget "Compact_Transformers_LICENSE.txt")
+Copy-Item -LiteralPath (Join-Path $project "3_models\GPT2\LICENSE") -Destination (Join-Path $licensesTarget "nanoGPT_LICENSE.txt")
+
+$smokeImage = Join-Path $releaseRoot "release_smoke.png"
+python (Join-Path $platform "scripts\verify_frozen_app.py") (Join-Path $appTarget "NeuroCIM.exe") $smokeImage
+if ($LASTEXITCODE -ne 0) { throw "Frozen application smoke test failed" }
+
+$manifestFiles = Get-ChildItem -LiteralPath $portable -Recurse -File
+$manifest = [ordered]@{
+    format_version = 1
+    product = "NeuroCIM DRAM CIM Simulation Platform"
+    platform = "Windows x64"
+    built_at = (Get-Date).ToString("o")
+    python = (python --version 2>&1 | Out-String).Trim()
+    file_count = $manifestFiles.Count
+    total_bytes = ($manifestFiles | Measure-Object Length -Sum).Sum
+    executable_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appTarget "NeuroCIM.exe")).Hash.ToLowerInvariant()
+    external_assets = @()
+    bundled_assets = @("five model checkpoints", "MNIST", "CIFAR-10", "device measurement CSV")
+    neurosim_license = "CC BY-NC 4.0"
+}
+$manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $portable "release_manifest.json") -Encoding UTF8
+
+$zipPath = Join-Path $releaseRoot "NeuroCIM-Windows-x64.zip"
+if (-not $SkipZip) {
+    python (Join-Path $platform "scripts\create_release_zip.py") $portable $zipPath
+    if ($LASTEXITCODE -ne 0) { throw "Release ZIP creation failed" }
+}
+
+$hashLines = @()
+$hashLines += "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appTarget "NeuroCIM.exe")).Hash.ToLowerInvariant(), "NeuroCIM-Windows-x64/NeuroCIM/NeuroCIM.exe"
+if (Test-Path -LiteralPath $zipPath) {
+    $hashLines += "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant(), "NeuroCIM-Windows-x64.zip"
+}
+$hashLines | Set-Content -LiteralPath (Join-Path $releaseRoot "SHA256SUMS.txt") -Encoding ASCII
+
+if (Test-Path -LiteralPath $buildRoot) { Remove-Item -LiteralPath $buildRoot -Recurse -Force }
+
+$size = (Get-ChildItem -LiteralPath $portable -Recurse -File | Measure-Object Length -Sum).Sum
+Write-Output ("Release ready: {0}" -f $portable)
+Write-Output ("Files: {0}; size: {1:N2} GB" -f ((Get-ChildItem -LiteralPath $portable -Recurse -File).Count), ($size / 1GB))
+if (Test-Path -LiteralPath $zipPath) { Write-Output ("ZIP: {0}" -f $zipPath) }
