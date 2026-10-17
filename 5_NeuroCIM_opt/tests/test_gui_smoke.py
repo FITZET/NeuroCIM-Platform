@@ -249,6 +249,32 @@ def test_single_inference_model_selection_updates_resources() -> None:
     widget.close()
 
 
+def test_single_inference_discards_stale_portable_resource_paths(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    widget = SingleInferenceWidget(ROOT.parent)
+    model_id = "lenet5-mnist"
+    defaults = widget._model_defaults(model_id)
+    stale = tmp_path / "old-portable-location"
+    settings = {
+        "dataset_root": stale / "data" / "mnist",
+        "checkpoint": stale / "3_models" / "LeNet_5" / "chekpoint" / "lenet5_float.pt",
+        "auxiliary": stale / "3_models" / "LeNet_5" / "chekpoint" / "quantization.json",
+    }
+    try:
+        for name, path in settings.items():
+            widget.settings.setValue(f"inference/{model_id}/{name}", str(path))
+        values = widget._model_configuration(model_id)
+        assert values["root"] == defaults["root"]
+        assert values["checkpoint"] == defaults["checkpoint"]
+        assert values["auxiliary"] == defaults["auxiliary"]
+        for name in settings:
+            assert widget.settings.value(f"inference/{model_id}/{name}") is None
+    finally:
+        for name in settings:
+            widget.settings.remove(f"inference/{model_id}/{name}")
+        widget.close()
+
+
 def test_real_grouped_batch_inference_chart_offscreen(tmp_path: Path) -> None:
     application = QApplication.instance() or QApplication([])
     widget = BatchInferenceWidget(ROOT.parent)
