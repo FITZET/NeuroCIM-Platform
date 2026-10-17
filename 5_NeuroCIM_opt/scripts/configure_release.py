@@ -14,7 +14,7 @@ def main() -> int:
     target.write_text(
         '"""Generated public release configuration."""\n\n'
         f'GITHUB_OAUTH_CLIENT_ID = {args.client_id.strip()!r}\n'
-        'GITHUB_OWNER = "FITZET"\n'
+        'GITHUB_OWNER = "Lowpower-Lab"\n'
         'GITHUB_DISTRIBUTION_REPOSITORY = "NeuroCIM-Distribution"\n'
         'ACCESS_PORTAL_URL = "https://fitzet.github.io/NeuroCIM-Access/"\n',
         encoding="utf-8",
