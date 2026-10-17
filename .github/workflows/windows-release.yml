@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force runtime-assets | Out-Null
-          gh release download runtime-assets-v1 --repo FITZET/NeuroCIM-Distribution --pattern 'runtime-assets.zip' --dir runtime-assets
+          gh release download runtime-assets-v1 --repo Lowpower-Lab/NeuroCIM-Distribution --pattern 'runtime-assets.zip' --dir runtime-assets
           Expand-Archive runtime-assets/runtime-assets.zip -DestinationPath . -Force
       - name: Build ${{ matrix.flavor }} installer
         shell: pwsh
@@ -123,14 +123,14 @@ jobs:
         shell: bash
         run: |
           tag="v${NEUROCIM_VERSION}"
-          if gh release view "$tag" --repo FITZET/NeuroCIM-Distribution >/dev/null 2>&1; then
-            gh release upload "$tag" --repo FITZET/NeuroCIM-Distribution --clobber \
+          if gh release view "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution >/dev/null 2>&1; then
+            gh release upload "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution --clobber \
               artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*
-            gh release edit "$tag" --repo FITZET/NeuroCIM-Distribution \
+            gh release edit "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution \
               --title "NeuroCIM ${NEUROCIM_VERSION}" \
               --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts."
           else
-            gh release create "$tag" --repo FITZET/NeuroCIM-Distribution \
+            gh release create "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution \
               --title "NeuroCIM ${NEUROCIM_VERSION}" \
               --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts." \
               artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*
