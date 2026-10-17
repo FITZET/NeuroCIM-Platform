@@ -1456,9 +1456,30 @@ class SingleInferenceWidget(QWidget):
     def _model_configuration(self, model_id: str) -> dict[str, str]:
         values = self._model_defaults(model_id)
         for name in ("dataset_root", "checkpoint", "auxiliary", "error_model"):
-            saved = str(self.settings.value(f"inference/{model_id}/{name}", ""))
-            if saved:
-                values["root" if name == "dataset_root" else name] = saved
+            setting_key = f"inference/{model_id}/{name}"
+            saved = str(self.settings.value(setting_key, ""))
+            if not saved:
+                continue
+            value_key = "root" if name == "dataset_root" else name
+            saved_path = Path(saved).expanduser()
+            default_path = Path(values[value_key]).expanduser() if values[value_key] else None
+            if name == "dataset_root":
+                marker = (
+                    Path("MNIST/raw/t10k-images-idx3-ubyte")
+                    if model_id.endswith("mnist")
+                    else Path("cifar-10-batches-py/test_batch")
+                )
+                saved_available = (saved_path / marker).is_file()
+                default_available = bool(default_path and (default_path / marker).is_file())
+            else:
+                saved_available = saved_path.is_file()
+                default_available = bool(default_path and default_path.is_file())
+            if saved_available or not default_available:
+                values[value_key] = saved
+            else:
+                # Absolute paths stored by an older portable/install location
+                # must not override resources bundled beside the current EXE.
+                self.settings.remove(setting_key)
         return values
 
     def _configuration_problems(self, model_id: str, values: dict[str, str] | None = None) -> list[str]:
