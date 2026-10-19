@@ -50,6 +50,16 @@ def require_file(root: Path, relative: str) -> Path:
     return path
 
 
+def require_resource(root: Path, relative: str) -> Path:
+    """Require a non-empty file or a non-empty resource directory."""
+    path = root / relative
+    if path.is_file() and path.stat().st_size > 0:
+        return path
+    if path.is_dir() and any(path.iterdir()):
+        return path
+    raise FileNotFoundError(f"Missing bundled resource: {path}")
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -95,7 +105,7 @@ def verify_vision_zoo(root: Path) -> int:
                 f"SHA256 mismatch for {model_id}: expected {row['sha256']}, got {actual}"
             )
         for auxiliary in row.get("auxiliary", ()):
-            require_file(root, auxiliary)
+            require_resource(root, auxiliary)
     return len(VISION_ZOO_IDS)
 
 
@@ -120,7 +130,7 @@ def verify_all_model_hashes(root: Path) -> int:
                 f"SHA256 mismatch for {model_id}: expected {row['sha256']}, got {actual}"
             )
         for auxiliary in row.get("auxiliary", ()):
-            require_file(root, auxiliary)
+            require_resource(root, auxiliary)
     return len(rows)
 
 

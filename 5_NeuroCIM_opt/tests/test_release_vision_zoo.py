@@ -117,3 +117,28 @@ def test_release_verifier_checks_every_model_checkpoint(tmp_path: Path) -> None:
     (tmp_path / rows[-1]["checkpoint"]).write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="SHA256 mismatch"):
         verifier.verify_all_model_hashes(tmp_path)
+
+
+def test_release_verifier_accepts_nonempty_auxiliary_directory(tmp_path: Path) -> None:
+    verifier = _load_script("verify_release_resources.py")
+    rows = []
+    for index in range(10):
+        checkpoint = tmp_path / "models" / f"model-{index}.pt"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(f"checkpoint-{index}".encode())
+        auxiliary = []
+        if index == 0:
+            tokenizer = tmp_path / "models/tokenizer"
+            tokenizer.mkdir()
+            (tokenizer / "vocab.json").write_text("{}", encoding="utf-8")
+            auxiliary = [tokenizer.relative_to(tmp_path).as_posix()]
+        rows.append({
+            "model_id": f"model-{index}",
+            "checkpoint": checkpoint.relative_to(tmp_path).as_posix(),
+            "auxiliary": auxiliary,
+            "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        })
+    (tmp_path / "model_resource_manifest.json").write_text(
+        json.dumps({"models": rows}), encoding="utf-8"
+    )
+    assert verifier.verify_all_model_hashes(tmp_path) == 10
