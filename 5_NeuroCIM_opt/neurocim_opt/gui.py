@@ -32,6 +32,10 @@ from .gpt2_service import (
     GPT2GenerationCancelled, GPT2GenerationOutcome, GPT2GenerationRequest,
     GPT2GenerationService,
 )
+from .gpt2_evaluation import (
+    WikiText2EvaluationCancelled, WikiText2EvaluationOutcome,
+    WikiText2EvaluationRequest, WikiText2EvaluationService,
+)
 from .mac_error_model import MacErrorModel, load_mac_csv
 from .paths import data_root
 from .training_service import (
@@ -45,6 +49,25 @@ from .updater import (
     installed_flavor, launch_installer,
 )
 from .version import __version__
+
+
+VISION_ZOO_MODEL_IDS = frozenset({
+    "resnet8-mnist", "mobilenetv2-cifar10", "vgg11-bn-cifar10",
+    "squeezenet1_1-cifar10",
+})
+RUNTIME_CALIBRATED_MODEL_IDS = frozenset({"bnn-mnist"})
+
+
+def _populate_image_model_combo(combo: _QComboBox, project_root: Path, capability: str):
+    """Populate a selector from registry capability and actual checkpoint state."""
+    registry = builtin_registry(project_root)
+    for spec in registry.list(task="image_classification", capability=capability):
+        combo.addItem(spec.display_name, spec.model_id)
+        item = combo.model().item(combo.count() - 1)
+        if item is not None and not spec.checkpoint_available:
+            item.setEnabled(False)
+            item.setToolTip(f"正式 checkpoint 尚未安装：{spec.checkpoint}")
+    return registry
 
 
 def _high_dpi_pixmap(
@@ -228,16 +251,17 @@ class WorkflowCoordinator(QObject):
         selected = self.context.selected_network_model()
         if selected:
             try:
-                self.model_registry.get(str(selected["model_id"]))
-                return str(selected["model_id"])
+                spec = self.model_registry.get(str(selected["model_id"]))
+                if spec.resources_available:
+                    return spec.model_id
             except KeyError:
                 pass
-        ready = [item for item in self.model_registry.list() if item.checkpoint_available]
+        ready = [item for item in self.model_registry.list() if item.resources_available]
         return (ready[0] if ready else self.model_registry.list()[0]).model_id
 
     def select_network_model(self, model_id: str) -> dict[str, Any]:
         spec = self.model_registry.get(model_id)
-        if not spec.checkpoint_available:
+        if not spec.resources_available:
             raise FileNotFoundError(f"模型 checkpoint 未安装：{spec.checkpoint}")
         result = self.context.select_network_model(
             model_id=spec.model_id, task=spec.task,
@@ -742,6 +766,36 @@ class GPT2BatchThread(QThread):
                 outcomes.append(outcome)
             self.succeeded.emit(tuple(outcomes))
         except GPT2GenerationCancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class WikiText2EvaluationThread(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal(str)
+    progressed = Signal(int, str)
+
+    def __init__(self, service: WikiText2EvaluationService,
+                 request: WikiText2EvaluationRequest):
+        super().__init__()
+        self.service = service
+        self.request = request
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
+
+    def run(self) -> None:
+        try:
+            outcome = self.service.run(
+                self.request,
+                progress=lambda percent, message: self.progressed.emit(percent, message),
+                cancelled=lambda: self._cancel_requested,
+            )
+            self.succeeded.emit(outcome)
+        except WikiText2EvaluationCancelled as exc:
             self.cancelled.emit(str(exc))
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -1326,8 +1380,9 @@ class SingleInferenceWidget(QWidget):
 
         form = QFormLayout()
         self.model_combo = QComboBox()
-        for spec in builtin_registry(self.project_root).list(task="image_classification"):
-            self.model_combo.addItem(spec.display_name, spec.model_id)
+        self.model_registry = _populate_image_model_combo(
+            self.model_combo, self.project_root, "single_inference"
+        )
         form.addRow("网络模型", self.model_combo)
         self.dataset_name = QLineEdit(); self.dataset_name.setReadOnly(True)
         form.addRow("数据集", self.dataset_name)
@@ -1428,24 +1483,19 @@ class SingleInferenceWidget(QWidget):
     def _model_defaults(self, model_id: str) -> dict[str, str]:
         platform = self.project_root / "5_NeuroCIM_opt"
         error_model = platform / "outputs/error_models/01_NMOS/error_model.json"
-        if model_id == "lenet5-mnist":
-            return {"dataset": "MNIST", "root": str(self._dataset_root("mnist")),
-                    "checkpoint": str(self.project_root / "3_models/LeNet_5/chekpoint/lenet5_float.pt"),
-                    "auxiliary": str(self.project_root / "3_models/LeNet_5/chekpoint/quantization.json"),
-                    "auxiliary_label": "量化参数", "error_model": str(error_model)}
-        if model_id == "bnn-mnist":
-            return {"dataset": "MNIST", "root": str(self._dataset_root("mnist")),
-                    "checkpoint": str(self.project_root / "3_models/BNN/checkpoint/bnn_mnist.pt"),
-                    "auxiliary": "", "auxiliary_label": "辅助参数（无需）", "error_model": str(error_model)}
-        if model_id == "tinytransformer-cifar10":
-            return {"dataset": "CIFAR-10", "root": str(self._dataset_root("cifar10")),
-                    "checkpoint": str(self.project_root / "3_models/TinyTransformer/checkpoint/cct_7_3x1_32_cifar10.pth"),
-                    "auxiliary": str(self.project_root / "3_models/TinyTransformer/checkpoint/input_scales.json"),
-                    "auxiliary_label": "输入尺度 JSON", "error_model": str(error_model)}
-        return {"dataset": "CIFAR-10", "root": str(self._dataset_root("cifar10")),
-                "checkpoint": str(self.project_root / "3_models/Resnet20/checkpoint/resnet20_cifar10.pt"),
-                "auxiliary": str(self.project_root / "3_models/Resnet20/output/formal/input_scales.json"),
-                "auxiliary_label": "输入尺度 JSON", "error_model": str(error_model)}
+        spec = self.model_registry.get(model_id)
+        dataset_id = spec.datasets[0]
+        auxiliary = str(spec.auxiliary_resources[0]) if spec.auxiliary_resources else ""
+        return {
+            "dataset": "MNIST" if dataset_id == "mnist" else "CIFAR-10",
+            "root": str(self._dataset_root(dataset_id)),
+            "checkpoint": str(spec.checkpoint or ""),
+            "auxiliary": auxiliary,
+            "auxiliary_label": (
+                "量化/输入尺度参数" if auxiliary else "输入尺度（运行时自动校准）"
+            ),
+            "error_model": str(error_model),
+        }
 
     def _dataset_root(self, dataset: str) -> Path:
         configured = data_root(dataset)
@@ -1457,6 +1507,11 @@ class SingleInferenceWidget(QWidget):
         values = self._model_defaults(model_id)
         for name in ("dataset_root", "checkpoint", "auxiliary", "error_model"):
             setting_key = f"inference/{model_id}/{name}"
+            if name == "auxiliary" and model_id in RUNTIME_CALIBRATED_MODEL_IDS:
+                # These models calibrate input scales from the training split.
+                # Ignore stale scale paths saved by an older portable install.
+                self.settings.remove(setting_key)
+                continue
             saved = str(self.settings.value(setting_key, ""))
             if not saved:
                 continue
@@ -1486,15 +1541,17 @@ class SingleInferenceWidget(QWidget):
         values = values or self._model_configuration(model_id)
         dataset = Path(values["root"]).expanduser()
         if model_id.endswith("mnist"):
-            dataset_files = [dataset / "MNIST/raw/t10k-images-idx3-ubyte",
-                             dataset / "MNIST/raw/t10k-labels-idx1-ubyte"]
+            from .inference_runtime import mnist_required_files
+            dataset_files = list(mnist_required_files(
+                dataset, include_training=model_id in RUNTIME_CALIBRATED_MODEL_IDS,
+            ))
         else:
             from .inference_runtime import cifar10_required_files
             dataset_files = list(cifar10_required_files(dataset))
         checks = [(path, "数据集") for path in dataset_files]
         checks += [(Path(values["checkpoint"]), "checkpoint"),
                   (Path(values["error_model"]), "误差模型")]
-        if model_id != "bnn-mnist":
+        if self.model_registry.get(model_id).auxiliary_resources:
             checks.append((Path(values["auxiliary"]), "辅助参数"))
         problems = [f"{purpose}: {path}" for path, purpose in checks if not path.is_file()]
         if self.require_workflow and (
@@ -1518,7 +1575,7 @@ class SingleInferenceWidget(QWidget):
         self.dataset_name.setText(values["dataset"]); self.dataset_edit.setText(values["root"])
         self.checkpoint_edit.setText(values["checkpoint"]); self.auxiliary_edit.setText(values["auxiliary"])
         self.auxiliary_label.setText(values["auxiliary_label"]); self.error_model_edit.setText(values["error_model"])
-        self.auxiliary_edit.setEnabled(model_id != "bnn-mnist")
+        self.auxiliary_edit.setEnabled(bool(values["auxiliary"]))
         if self.require_workflow:
             self._sync_workflow_error_path()
 
@@ -1618,7 +1675,7 @@ class SingleInferenceWidget(QWidget):
 
     @staticmethod
     def _display_name(model_id: str, label: int) -> str:
-        if model_id in {"resnet20-cifar10", "tinytransformer-cifar10"}:
+        if model_id.endswith("cifar10"):
             names = ("airplane", "automobile", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck")
             return f"{label} ({names[label]})" if 0 <= label < len(names) else str(label)
         return str(label)
@@ -1731,8 +1788,9 @@ class BatchInferenceWidget(QWidget):
 
         form = QFormLayout()
         self.model_combo = QComboBox()
-        for spec in builtin_registry(self.project_root).list(task="image_classification"):
-            self.model_combo.addItem(spec.display_name, spec.model_id)
+        self.model_registry = _populate_image_model_combo(
+            self.model_combo, self.project_root, "batch_inference"
+        )
         form.addRow("网络模型", self.model_combo)
 
         self.dataset_name = QLineEdit(); self.dataset_name.setReadOnly(True)
@@ -1822,24 +1880,18 @@ class BatchInferenceWidget(QWidget):
         return next((path for path in candidates if (path / marker).is_file()), candidates[0])
 
     def _model_defaults(self, model_id: str) -> dict[str, str]:
-        if model_id == "lenet5-mnist":
-            model = self.project_root / "3_models/LeNet_5/chekpoint"
-            return {"dataset": "MNIST", "root": str(self._dataset_root("mnist")),
-                    "checkpoint": str(model / "lenet5_float.pt"),
-                    "auxiliary": str(model / "quantization.json"), "auxiliary_label": "量化参数"}
-        if model_id == "bnn-mnist":
-            return {"dataset": "MNIST", "root": str(self._dataset_root("mnist")),
-                    "checkpoint": str(self.project_root / "3_models/BNN/checkpoint/bnn_mnist.pt"),
-                    "auxiliary": "", "auxiliary_label": "辅助参数（自动校准）"}
-        if model_id == "tinytransformer-cifar10":
-            return {"dataset": "CIFAR-10", "root": str(self._dataset_root("cifar10")),
-                    "checkpoint": str(self.project_root / "3_models/TinyTransformer/checkpoint/cct_7_3x1_32_cifar10.pth"),
-                    "auxiliary": str(self.project_root / "3_models/TinyTransformer/checkpoint/input_scales.json"),
-                    "auxiliary_label": "输入尺度 JSON"}
-        return {"dataset": "CIFAR-10", "root": str(self._dataset_root("cifar10")),
-                "checkpoint": str(self.project_root / "3_models/Resnet20/checkpoint/resnet20_cifar10.pt"),
-                "auxiliary": str(self.project_root / "3_models/Resnet20/output/formal/input_scales.json"),
-                "auxiliary_label": "输入尺度 JSON"}
+        spec = self.model_registry.get(model_id)
+        dataset_id = spec.datasets[0]
+        auxiliary = str(spec.auxiliary_resources[0]) if spec.auxiliary_resources else ""
+        return {
+            "dataset": "MNIST" if dataset_id == "mnist" else "CIFAR-10",
+            "root": str(self._dataset_root(dataset_id)),
+            "checkpoint": str(spec.checkpoint or ""),
+            "auxiliary": auxiliary,
+            "auxiliary_label": (
+                "量化/输入尺度参数" if auxiliary else "输入尺度（运行时自动校准）"
+            ),
+        }
 
     def _model_changed(self, _index: int) -> None:
         values = self._model_defaults(str(self.model_combo.currentData()))
@@ -1847,7 +1899,8 @@ class BatchInferenceWidget(QWidget):
         self.checkpoint_edit.setText(values["checkpoint"]); self.quantization_edit.setText(values["auxiliary"])
         self.auxiliary_label.setText(values["auxiliary_label"])
         self.quantization_edit.setEnabled(bool(values["auxiliary"]))
-        if str(self.model_combo.currentData()) == "tinytransformer-cifar10" and self.batch_size.value() > 4:
+        model_id = str(self.model_combo.currentData())
+        if (model_id == "tinytransformer-cifar10" or model_id in VISION_ZOO_MODEL_IDS) and self.batch_size.value() > 4:
             self.batch_size.setValue(4)
 
     def _refresh_error_models(self) -> None:
@@ -1894,12 +1947,12 @@ class BatchInferenceWidget(QWidget):
         if path: self.output_edit.setText(path)
 
     def _request(self) -> BatchInferenceRequest:
-        auxiliary = self.quantization_edit.text().strip() or self.checkpoint_edit.text().strip()
+        auxiliary = self.quantization_edit.text().strip()
         return BatchInferenceRequest(
             project_root=self.project_root,
             dataset_root=Path(self.dataset_edit.text().strip()),
             checkpoint_path=Path(self.checkpoint_edit.text().strip()),
-            quantization_path=Path(auxiliary),
+            quantization_path=Path(auxiliary) if auxiliary else None,
             error_model_path=Path(self.error_model_edit.text().strip()),
             model_id=str(self.model_combo.currentData()), device=self.device_combo.currentText(),
             sample_count=self.sample_count.value(), group_size=self.group_size.value(),
@@ -1928,7 +1981,8 @@ class BatchInferenceWidget(QWidget):
         required = list(dataset_files) + [
             (request.checkpoint_path, "checkpoint"), (request.error_model_path, "误差模型")
         ]
-        if model_id != "bnn-mnist": required.append((request.quantization_path, "辅助参数"))
+        if self.model_registry.get(model_id).auxiliary_resources:
+            required.append((request.quantization_path, "辅助参数"))
         missing = [f"{name}: {path}" for path, name in required if not path.is_file()]
         if missing:
             message = "缺少批量推理资源：\n" + "\n".join(missing)
@@ -2188,7 +2242,7 @@ class ErrorAwareTrainingWidget(QWidget):
             if self.require_workflow: self.run_button.setEnabled(False)
             return
         self.model_edit.setText(str(values["network_model"]))
-        if str(values["network_model"]) == "gpt2-small":
+        if str(values["network_model"]) in {"gpt2-small", "gpt2-large"}:
             self.dataset_name.setText(str(values["dataset_name"]))
             self.dataset_edit.setText(str(values["dataset_root"]))
             self.checkpoint_edit.setText(str(values["checkpoint_path"]))
@@ -2199,8 +2253,11 @@ class ErrorAwareTrainingWidget(QWidget):
             )
             self.run_button.setEnabled(False)
             return
-        if str(values["network_model"]) == "tinytransformer-cifar10" and self.batch_spin.value() > 128:
+        inherited_model = str(values["network_model"])
+        if inherited_model == "tinytransformer-cifar10" and self.batch_spin.value() > 128:
             self.batch_spin.setValue(128)
+        elif inherited_model in VISION_ZOO_MODEL_IDS and self.batch_spin.value() > 4:
+            self.batch_spin.setValue(4)
         self.dataset_name.setText(str(values["dataset_name"]))
         self.dataset_edit.setText(str(values["dataset_root"]))
         self.checkpoint_edit.setText(str(values["checkpoint_path"]))
@@ -2548,6 +2605,9 @@ class GPT2GenerationWidget(QWidget):
         self.worker: GPT2GenerationThread | None = None
         self.last_outcome: GPT2GenerationOutcome | None = None
         model_root = self.project_root / "3_models/GPT2/checkpoint"
+        self.model_variant = "gpt2-small"
+        self.dataset_name = "prompt_text"
+        self.dataset_root = model_root / "tokenizer"
         platform_root = self.project_root / "5_NeuroCIM_opt"
 
         layout = QVBoxLayout(self)
@@ -2557,6 +2617,8 @@ class GPT2GenerationWidget(QWidget):
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
+        self.model_label = QLabel("GPT-2 Small / prompt_text")
+        form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(model_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         form.addRow("GPT-2 Checkpoint", self.checkpoint_edit)
         self.tokenizer_edit = QLineEdit(str(model_root / "tokenizer")); self.tokenizer_edit.setReadOnly(True)
@@ -2611,6 +2673,25 @@ class GPT2GenerationWidget(QWidget):
         else:
             self.error_model_combo.addItem("手动误差模型", None); self.error_model_combo.setEnabled(False)
 
+    def apply_model_selection(self, spec) -> None:
+        if spec.model_id not in {"gpt2-small", "gpt2-large"}:
+            return
+        self.model_variant = spec.model_id
+        self.dataset_name = spec.datasets[0]
+        checkpoint_root = self.project_root / "3_models/GPT2/checkpoint"
+        if spec.model_id == "gpt2-large":
+            resource_root = checkpoint_root / "gpt2-large"
+            self.checkpoint_edit.setText(str(resource_root / "model.safetensors"))
+            self.tokenizer_edit.setText(str(resource_root))
+            self.scales_edit.setText(str(resource_root / "input_scales.json"))
+            self.dataset_root = resource_root / "wikitext-2-raw-v1"
+        else:
+            self.checkpoint_edit.setText(str(checkpoint_root / "gpt2_nanogpt.pt"))
+            self.tokenizer_edit.setText(str(checkpoint_root / "tokenizer"))
+            self.scales_edit.setText(str(checkpoint_root / "input_scales.json"))
+            self.dataset_root = checkpoint_root / "tokenizer"
+        self.model_label.setText(f"{spec.display_name} / {self.dataset_name}")
+
     def _refresh_models(self) -> None:
         if self.coordinator is None: return
         _fill_error_model_combo(self.error_model_combo, self.coordinator,
@@ -2641,7 +2722,7 @@ class GPT2GenerationWidget(QWidget):
             input_scales_path=Path(self.scales_edit.text()),
             error_model_path=Path(self.error_model_edit.text()),
             max_new_tokens=self.max_tokens.value(), error_strength=self.lambda_spin.value(),
-            device=self.device_combo.currentText(),
+            device=self.device_combo.currentText(), model_variant=self.model_variant,
         )
 
     def start_generation(self) -> None:
@@ -2700,8 +2781,8 @@ class GPT2GenerationWidget(QWidget):
         if self.coordinator is not None and self.error_model_combo.currentData():
             try:
                 self.coordinator.record_inference(
-                    model_id=str(self.error_model_combo.currentData()), dataset_name="prompt_text",
-                    dataset_root=self.tokenizer_edit.text(), network_model="gpt2-small",
+                    model_id=str(self.error_model_combo.currentData()), dataset_name=self.dataset_name,
+                    dataset_root=str(self.dataset_root), network_model=outcome.model_variant,
                     checkpoint_path=self.checkpoint_edit.text(), auxiliary_path=self.scales_edit.text(),
                     device=outcome.device, result=outcome.as_dict(),
                 )
@@ -2731,6 +2812,9 @@ class GPT2BatchInferenceWidget(QWidget):
         self.service = GPT2GenerationService()
         self.worker: GPT2BatchThread | None = None
         checkpoint_root = self.project_root / "3_models/GPT2/checkpoint"
+        self.model_variant = "gpt2-small"
+        self.dataset_name = "prompt_text"
+        self.dataset_root = checkpoint_root / "tokenizer"
         platform_root = self.project_root / "5_NeuroCIM_opt"
         layout = QVBoxLayout(self)
         description = QLabel(
@@ -2738,10 +2822,11 @@ class GPT2BatchInferenceWidget(QWidget):
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
+        self.model_label = QLabel("GPT-2 Small / prompt_text")
+        form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(checkpoint_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         self.tokenizer_edit = QLineEdit(str(checkpoint_root / "tokenizer")); self.tokenizer_edit.setReadOnly(True)
         self.scales_edit = QLineEdit(str(checkpoint_root / "input_scales.json")); self.scales_edit.setReadOnly(True)
-        form.addRow("继承的模型", QLabel("GPT-2 Small + prompt_text"))
         form.addRow("Checkpoint", self.checkpoint_edit)
         form.addRow("分词器", self.tokenizer_edit)
         self.error_model_combo = QComboBox(); form.addRow("误差建模方法", self.error_model_combo)
@@ -2775,6 +2860,9 @@ class GPT2BatchInferenceWidget(QWidget):
         layout.addWidget(self.result_table)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100)
         layout.addWidget(self.log)
+        self.evaluation_widget = WikiText2EvaluationWidget(self.project_root)
+        self.evaluation_widget.setVisible(False)
+        layout.addWidget(self.evaluation_widget)
         if coordinator is not None:
             _fill_error_model_combo(self.error_model_combo, coordinator)
             self.error_model_combo.currentIndexChanged.connect(self._error_changed)
@@ -2806,6 +2894,27 @@ class GPT2BatchInferenceWidget(QWidget):
         model = self.coordinator.registry.resolve(str(self.error_model_combo.currentData()))
         self.error_model_edit.setText(str(Path(model["path"]).resolve()))
 
+    def apply_model_selection(self, spec) -> None:
+        if spec.model_id not in {"gpt2-small", "gpt2-large"}:
+            return
+        self.model_variant = spec.model_id
+        self.dataset_name = spec.datasets[0]
+        checkpoint_root = self.project_root / "3_models/GPT2/checkpoint"
+        if spec.model_id == "gpt2-large":
+            resource_root = checkpoint_root / "gpt2-large"
+            self.checkpoint_edit.setText(str(resource_root / "model.safetensors"))
+            self.tokenizer_edit.setText(str(resource_root))
+            self.scales_edit.setText(str(resource_root / "input_scales.json"))
+            self.dataset_root = resource_root / "wikitext-2-raw-v1"
+        else:
+            self.checkpoint_edit.setText(str(checkpoint_root / "gpt2_nanogpt.pt"))
+            self.tokenizer_edit.setText(str(checkpoint_root / "tokenizer"))
+            self.scales_edit.setText(str(checkpoint_root / "input_scales.json"))
+            self.dataset_root = checkpoint_root / "tokenizer"
+        self.model_label.setText(f"{spec.display_name} / {self.dataset_name}")
+        if hasattr(self, "evaluation_widget"):
+            self.evaluation_widget.apply_model_selection(spec)
+
     def _requests(self) -> tuple[GPT2GenerationRequest, ...]:
         prompts = tuple(line.strip() for line in self.prompts_edit.toPlainText().splitlines() if line.strip())
         if not prompts:
@@ -2819,7 +2928,7 @@ class GPT2BatchInferenceWidget(QWidget):
             input_scales_path=Path(self.scales_edit.text()),
             error_model_path=Path(self.error_model_edit.text()),
             max_new_tokens=self.max_tokens.value(), error_strength=self.lambda_spin.value(),
-            device=self.device_combo.currentText(),
+            device=self.device_combo.currentText(), model_variant=self.model_variant,
         ) for prompt in prompts)
 
     def start_inference(self) -> None:
@@ -2873,8 +2982,8 @@ class GPT2BatchInferenceWidget(QWidget):
         if self.coordinator is not None and self.error_model_combo.currentData():
             try:
                 self.coordinator.record_inference(
-                    model_id=str(self.error_model_combo.currentData()), dataset_name="prompt_text",
-                    dataset_root=self.tokenizer_edit.text(), network_model="gpt2-small",
+                    model_id=str(self.error_model_combo.currentData()), dataset_name=self.dataset_name,
+                    dataset_root=str(self.dataset_root), network_model=outcomes[0].model_variant,
                     checkpoint_path=self.checkpoint_edit.text(), auxiliary_path=self.scales_edit.text(),
                     device=outcomes[0].device,
                     result={"average_device_token_agreement": average, "samples": payload},
@@ -2891,6 +3000,162 @@ class GPT2BatchInferenceWidget(QWidget):
     def _finished(self) -> None:
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
         if self.result_table.rowCount(): self.progress.setValue(100)
+
+
+class WikiText2EvaluationWidget(QWidget):
+    """Offline WikiText-2 sliding-window loss/perplexity evaluation for GPT-2 Large."""
+
+    DATASET_SHA256 = {
+        "train": "57f3eb280cfe78d8cebe3aa76d7416607845416e22464dd9709ccb487f8d7b92",
+        "validation": "fbf387067edf87fc0f11e8cc1708be8ff6c944f6eeb98c1e34140c8a95629a00",
+        "test": "7952b062817620ac99b47296dc945942b55068d0e85baf1f95f300c7ad1480ef",
+    }
+
+    def __init__(self, project_root: Path, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.project_root = Path(project_root).resolve()
+        self.service = WikiText2EvaluationService()
+        self.worker: WikiText2EvaluationThread | None = None
+        self.last_outcome: WikiText2EvaluationOutcome | None = None
+        self.model_variant = "gpt2-large"
+        resource_root = self.project_root / "3_models/GPT2/checkpoint/gpt2-large"
+
+        layout = QVBoxLayout(self)
+        group = QGroupBox("WikiText-2 语言模型评估（浮点基线）")
+        group_layout = QVBoxLayout(group)
+        note = QLabel(
+            "使用离线 WikiText-2 raw-v1 计算滑窗负对数似然和困惑度。"
+            "批大小固定为 1；每个目标 token 只计入一次。"
+        )
+        note.setWordWrap(True); group_layout.addWidget(note)
+        form = QFormLayout()
+        self.model_label = QLabel("GPT-2 Large / WikiText-2")
+        form.addRow("继承的模型", self.model_label)
+        self.checkpoint_edit = QLineEdit(str(resource_root / "model.safetensors"))
+        self.checkpoint_edit.setReadOnly(True); form.addRow("Checkpoint", self.checkpoint_edit)
+        self.tokenizer_edit = QLineEdit(str(resource_root))
+        self.tokenizer_edit.setReadOnly(True); form.addRow("分词器", self.tokenizer_edit)
+        self.dataset_edit = QLineEdit(str(resource_root / "wikitext-2-raw-v1"))
+        self.dataset_edit.setReadOnly(True); form.addRow("WikiText-2 raw", self.dataset_edit)
+        self.split_combo = QComboBox(); self.split_combo.addItems(["test", "validation", "train"])
+        form.addRow("数据切分", self.split_combo)
+        self.context_spin = QSpinBox(); self.context_spin.setRange(2, 1024); self.context_spin.setValue(1024)
+        form.addRow("上下文长度", self.context_spin)
+        self.stride_spin = QSpinBox(); self.stride_spin.setRange(1, 1023); self.stride_spin.setValue(512)
+        form.addRow("滑窗步长", self.stride_spin)
+        self.max_tokens_spin = QSpinBox(); self.max_tokens_spin.setRange(0, 10_000_000)
+        self.max_tokens_spin.setValue(4096); self.max_tokens_spin.setSpecialValueText("完整语料")
+        form.addRow("最多评估 token", self.max_tokens_spin)
+        self.device_combo = QComboBox(); self.device_combo.addItems(["auto", "cuda", "cpu"])
+        form.addRow("运行设备", self.device_combo)
+        group_layout.addLayout(form)
+        controls = QHBoxLayout()
+        self.run_button = QPushButton("开始 WikiText-2 评估")
+        self.run_button.clicked.connect(self.start_evaluation)
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.setEnabled(False); self.cancel_button.clicked.connect(self.cancel_evaluation)
+        controls.addWidget(self.run_button); controls.addWidget(self.cancel_button); controls.addStretch()
+        group_layout.addLayout(controls)
+        self.progress = QProgressBar(); self.progress.setRange(0, 100); group_layout.addWidget(self.progress)
+        self.summary = QLabel("尚未运行"); self.summary.setWordWrap(True); group_layout.addWidget(self.summary)
+        self.result_table = QTableWidget(0, 2)
+        self.result_table.setHorizontalHeaderLabels(["指标", "结果"])
+        self.result_table.setMaximumHeight(260); group_layout.addWidget(self.result_table)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100)
+        group_layout.addWidget(self.log)
+        layout.addWidget(group)
+
+    def apply_model_selection(self, spec) -> None:
+        visible = spec.model_id == "gpt2-large"
+        self.setVisible(visible)
+        if not visible:
+            return
+        self.model_variant = spec.model_id
+        resource_root = Path(spec.checkpoint).parent
+        self.model_label.setText(f"{spec.display_name} / {spec.datasets[0]}")
+        self.checkpoint_edit.setText(str(spec.checkpoint))
+        self.tokenizer_edit.setText(str(resource_root))
+        self.dataset_edit.setText(str(spec.dataset_root))
+
+    def _request(self) -> WikiText2EvaluationRequest:
+        split = self.split_combo.currentText()
+        maximum = self.max_tokens_spin.value()
+        return WikiText2EvaluationRequest(
+            project_root=self.project_root, model_variant=self.model_variant,
+            checkpoint_path=Path(self.checkpoint_edit.text()),
+            tokenizer_path=Path(self.tokenizer_edit.text()),
+            dataset_path=Path(self.dataset_edit.text()), split=split,
+            device=self.device_combo.currentText(), stride=self.stride_spin.value(),
+            context_length=self.context_spin.value(), batch_size=1,
+            max_eval_tokens=maximum or None,
+            expected_dataset_sha256=self.DATASET_SHA256[split],
+        )
+
+    def start_evaluation(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            return
+        request = self._request()
+        if request.stride >= request.context_length:
+            self.summary.setText("滑窗步长必须小于上下文长度")
+            return
+        self.last_outcome = None; self.result_table.setRowCount(0); self.progress.setValue(0)
+        self.run_button.setEnabled(False); self.cancel_button.setEnabled(True)
+        self.summary.setText("正在评估 WikiText-2……")
+        self.worker = WikiText2EvaluationThread(self.service, request)
+        self.worker.progressed.connect(self._progressed)
+        self.worker.succeeded.connect(self._succeeded)
+        self.worker.failed.connect(self._failed)
+        self.worker.cancelled.connect(self._cancelled)
+        self.worker.finished.connect(self._finished)
+        self.worker.start()
+
+    def cancel_evaluation(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.request_cancel(); self.cancel_button.setEnabled(False)
+
+    def _progressed(self, percent: int, message: str) -> None:
+        self.progress.setValue(percent); self.summary.setText(message)
+
+    def _succeeded(self, outcome: WikiText2EvaluationOutcome) -> None:
+        self.last_outcome = outcome
+        values = (
+            ("loss", f"{outcome.loss:.6f}"),
+            ("perplexity", f"{outcome.perplexity:.6f}"),
+            ("预测 token 数", str(outcome.predicted_token_count)),
+            ("滑窗数", str(outcome.window_count)),
+            ("是否截断", "是" if outcome.truncated else "否"),
+            ("模型 SHA256", outcome.checkpoint_sha256),
+            ("数据 SHA256", outcome.dataset_sha256),
+            ("误差注入范围", outcome.injection_scope),
+        )
+        self.result_table.setRowCount(len(values))
+        for row, (name, value) in enumerate(values):
+            self.result_table.setItem(row, 0, QTableWidgetItem(name))
+            self.result_table.setItem(row, 1, QTableWidgetItem(value))
+        self.result_table.resizeColumnsToContents()
+        output = (self.project_root / "5_NeuroCIM_opt/outputs/gui_runs"
+                  / datetime.now().strftime("%Y%m%d-%H%M%S") / "wikitext2")
+        output.mkdir(parents=True, exist_ok=True)
+        result_path = output / "evaluation_result.json"
+        result_path.write_text(
+            json.dumps(outcome.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        self.summary.setText(
+            f"完成：loss={outcome.loss:.6f}，perplexity={outcome.perplexity:.6f}，"
+            f"tokens={outcome.predicted_token_count}"
+        )
+        self.log.appendPlainText(f"结果：{result_path}")
+
+    def _failed(self, trace: str) -> None:
+        self.summary.setText("WikiText-2 评估失败"); self.log.appendPlainText(trace)
+
+    def _cancelled(self, message: str) -> None:
+        self.summary.setText(message); self.log.appendPlainText(message)
+
+    def _finished(self) -> None:
+        self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
+        if self.last_outcome is not None:
+            self.progress.setValue(100)
 
 
 class UnifiedSingleInferenceWidget(QWidget):
@@ -2922,6 +3187,7 @@ class UnifiedSingleInferenceWidget(QWidget):
             f"继承“网络与数据集”配置：{spec.display_name} / {', '.join(spec.datasets)}"
         )
         if spec.task == "text_generation":
+            self.gpt_widget.apply_model_selection(spec)
             self.stack.setCurrentWidget(self.gpt_widget)
         else:
             index = self.image_widget.model_combo.findData(model_id)
@@ -2958,6 +3224,7 @@ class UnifiedBatchInferenceWidget(QWidget):
             f"继承“网络与数据集”配置：{spec.display_name} / {', '.join(spec.datasets)}"
         )
         if spec.task == "text_generation":
+            self.gpt_widget.apply_model_selection(spec)
             self.stack.setCurrentWidget(self.gpt_widget)
         else:
             index = self.image_widget.model_combo.findData(model_id)
@@ -3193,7 +3460,7 @@ class ModelCatalogWidget(QWidget):
         selected = coordinator.selected_network_model_id() if coordinator else self.specs[0].model_id
         for row, spec in enumerate(self.specs):
             selector = QCheckBox()
-            selector.setEnabled(spec.checkpoint_available)
+            selector.setEnabled(spec.resources_available)
             selector.setChecked(spec.model_id == selected)
             selector.setToolTip("选择后，推理与训练页面统一使用此组合")
             self.selection_group.addButton(selector, row)
@@ -3203,7 +3470,7 @@ class ModelCatalogWidget(QWidget):
             values = [
                 spec.model_id, spec.display_name, spec.task, ", ".join(spec.datasets),
                 "×".join(map(str, spec.input_shape)), ", ".join(spec.metrics),
-                "可用" if spec.checkpoint_available else "未安装",
+                "可用" if spec.resources_available else "未安装",
             ]
             for column, value in enumerate(values):
                 self.table.setItem(row, column + 1, QTableWidgetItem(value))
@@ -3216,9 +3483,9 @@ class ModelCatalogWidget(QWidget):
             coordinator.network_changed.connect(self._sync_selection)
             selected_spec = next(item for item in self.specs if item.model_id == selected)
             if (coordinator.context.selected_network_model() is None
-                    and selected_spec.checkpoint_available):
+                    and selected_spec.resources_available):
                 coordinator.select_network_model(selected)
-            if selected_spec.checkpoint_available:
+            if selected_spec.resources_available:
                 self._sync_selection(coordinator.selected_network_model_id())
             else:
                 self.selection_status.setText(
@@ -3256,6 +3523,12 @@ def run_gui(platform_root: str | Path) -> int:
     configure_windows_font(application)
     apply_application_style(application)
     resolved_platform = Path(platform_root).expanduser().resolve()
+    version_smoke_result = os.environ.get("NEUROCIM_RELEASE_VERSION_RESULT")
+    if version_smoke_result:
+        target = Path(version_smoke_result).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(__version__ + "\n", encoding="utf-8")
+        return 0
     gpt_smoke_result = os.environ.get("NEUROCIM_RELEASE_GPT_SMOKE")
     if gpt_smoke_result:
         target = Path(gpt_smoke_result).expanduser().resolve()

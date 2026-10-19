@@ -98,3 +98,38 @@ def test_bnn_diagnostic_requires_train_and_test_mnist(tmp_path: Path) -> None:
         )
     message = str(captured.value)
     assert "train-images-idx3-ubyte" in message and "t10k-images-idx3-ubyte" in message
+
+
+def test_bnn_inference_prefers_best_error_aware_state(tmp_path: Path, monkeypatch) -> None:
+    import torch
+    import bnn.data
+    from bnn.model import BinaryMNIST
+
+    _checkpoint, error_model = _resources()
+    dataset_root = _synthetic_mnist_root(tmp_path / "dataset")
+    checkpoint = tmp_path / "eat_checkpoint.pt"
+    final = {"marker": torch.tensor(1)}
+    best = {"marker": torch.tensor(2)}
+    torch.save({"model_state_dict": final, "best_model_state_dict": best}, checkpoint)
+    captured = {}
+
+    class LoadedExpectedState(RuntimeError):
+        pass
+
+    def capture_state(_self, state, *args, **kwargs):
+        captured.update(state)
+        raise LoadedExpectedState
+
+    monkeypatch.setattr(BinaryMNIST, "load_state_dict", capture_state)
+    # This test stops at checkpoint loading, so no real IDX payload is needed.
+    monkeypatch.setattr(bnn.data, "create_loaders", lambda *args, **kwargs: (None, None, None))
+    clear_lenet_inference_cache()
+    with pytest.raises(LoadedExpectedState):
+        get_bnn_inference_resources(
+            model_root=PROJECT_ROOT / "3_models/BNN",
+            dataset_root=dataset_root,
+            checkpoint_path=checkpoint,
+            error_model_path=error_model,
+            device_name="cpu",
+        )
+    assert int(captured["marker"]) == 2

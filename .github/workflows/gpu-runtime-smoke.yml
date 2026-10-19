@@ -1,0 +1,36 @@
+name: Real NVIDIA CUDA release gate
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  real-cuda-smoke:
+    # Register a Windows NVIDIA runner with all four labels. GitHub-hosted
+    # windows-latest has no GPU and must never be used to claim this gate passed.
+    runs-on: [self-hosted, Windows, X64, neurocim-gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the release CUDA build
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
+      - name: Run real CUDA tensor and NeuroCIM model operations
+        shell: pwsh
+        working-directory: 5_NeuroCIM_opt
+        run: |
+          python scripts/gpu_release_smoke.py --output gpu-runtime-smoke.json
+          if ($LASTEXITCODE -ne 0) { throw "Real CUDA release gate failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-runtime-smoke
+          path: 5_NeuroCIM_opt/gpu-runtime-smoke.json
+          retention-days: 30

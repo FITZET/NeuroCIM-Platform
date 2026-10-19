@@ -105,5 +105,6 @@ def save_checkpoint(model: LeNet5, path: str | Path, **metadata) -> None:
 
 def load_checkpoint(model: LeNet5, path: str | Path, *, map_location="cpu") -> dict:
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=True)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    state = checkpoint.get("best_model_state_dict", checkpoint["model_state_dict"])
+    model.load_state_dict(state)
     return checkpoint.get("metadata", {})

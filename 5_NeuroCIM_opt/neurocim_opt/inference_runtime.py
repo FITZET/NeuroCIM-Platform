@@ -9,6 +9,12 @@ from threading import RLock
 from typing import Any
 
 
+VISION_ZOO_MODEL_IDS = frozenset({
+    "resnet8-mnist", "mobilenetv2-cifar10", "vgg11-bn-cifar10",
+    "squeezenet1_1-cifar10",
+})
+
+
 @dataclass(frozen=True)
 class ResourceSignature:
     path: str
@@ -205,7 +211,9 @@ def _registered_key(
     model_id: str, dataset_root: Path, checkpoint: Path, auxiliary: Path | None,
     error_model: Path, device_name: str,
 ) -> tuple[Any, ...]:
-    if model_id in {"resnet20-cifar10", "tinytransformer-cifar10"}:
+    if model_id in {"resnet20-cifar10", "tinytransformer-cifar10"} or (
+        model_id in VISION_ZOO_MODEL_IDS and model_id.endswith("cifar10")
+    ):
         data_files = cifar10_required_files(dataset_root)
         purposes = tuple(f"CIFAR-10 {path.name}" for path in data_files)
         missing = [path for path in data_files if not path.is_file()]
@@ -214,7 +222,7 @@ def _registered_key(
                 f"CIFAR-10 dataset is incomplete under {dataset_root}. Missing extracted files:\n"
                 + "\n".join(str(path) for path in missing)
             )
-    elif model_id == "bnn-mnist":
+    elif model_id in {"bnn-mnist", "resnet8-mnist"}:
         data_files = mnist_required_files(dataset_root, include_training=True)
         purposes = tuple(f"MNIST {path.name}" for path in data_files)
         missing = [path for path in data_files if not path.is_file()]
@@ -234,6 +242,86 @@ def _registered_key(
         signatures += (_signature(auxiliary, f"{model_id} auxiliary parameters"),)
     logical = (model_id, str(dataset_root), str(checkpoint), str(auxiliary), str(error_model), device_name)
     return logical, signatures
+
+
+def get_vision_zoo_inference_resources(
+    *, model_id: str, model_root: Path, dataset_root: Path,
+    checkpoint_path: Path, input_scales_path: Path | None,
+    error_model_path: Path, device_name: str,
+) -> tuple[RegisteredInferenceResources, bool]:
+    """Load any VisionZoo classifier through its shared factory/data/engine API."""
+    if model_id not in VISION_ZOO_MODEL_IDS:
+        raise ValueError(f"Unsupported VisionZoo inference model: {model_id}")
+    global _HITS, _MISSES, _INVALIDATIONS
+    logical = (
+        model_id, str(dataset_root), str(checkpoint_path), str(input_scales_path),
+        str(error_model_path), device_name,
+    )
+    with _LOCK:
+        try:
+            key = _registered_key(
+                model_id, dataset_root, checkpoint_path, input_scales_path,
+                error_model_path, device_name,
+            )
+        except FileNotFoundError:
+            stale = [item for item in _REGISTERED_CACHE if item[0] == logical]
+            for old_key in stale:
+                del _REGISTERED_CACHE[old_key]
+            _INVALIDATIONS += len(stale)
+            raise
+        cached = _REGISTERED_CACHE.get(key)
+        if cached is not None:
+            _HITS += 1
+            return cached, True
+        stale = [item for item in _REGISTERED_CACHE if item[0] == logical]
+        for old_key in stale:
+            del _REGISTERED_CACHE[old_key]
+        _INVALIDATIONS += len(stale)
+        _MISSES += 1
+
+        if str(model_root) not in sys.path:
+            sys.path.insert(0, str(model_root))
+        import json
+        import numpy as np
+        import torch
+        from vision_zoo.checkpoint import load_checkpoint
+        from vision_zoo.data import create_loaders
+        from vision_zoo.engine import calibrate_input_scales, differential_copy
+        from vision_zoo.models import create_model
+        from .error_model import HardwareErrorModel
+
+        calibration, _validation, test = create_loaders(
+            model_id, dataset_root, batch_size=16, eval_batch_size=16,
+            seed=42, num_workers=0, download=False,
+        )
+        float_model = load_checkpoint(create_model(model_id), checkpoint_path)
+        if input_scales_path is not None:
+            input_scales = json.loads(input_scales_path.read_text(encoding="utf-8"))
+            if not isinstance(input_scales, dict) or not input_scales:
+                raise ValueError(
+                    f"{model_id} input scales must be a non-empty JSON object: "
+                    f"{input_scales_path}"
+                )
+            input_scales = {str(name): float(value) for name, value in input_scales.items()}
+        else:
+            input_scales = calibrate_input_scales(
+                float_model, calibration, device=device_name, max_batches=1,
+            )
+        codes = np.arange(256, dtype=np.int64)
+        ideal_lut = codes[:, None] * codes[None, :]
+        device_lut = HardwareErrorModel.load(error_model_path).lut
+        ideal_model = differential_copy(float_model, ideal_lut, input_scales)
+        device_model = differential_copy(float_model, device_lut, input_scales)
+        device = torch.device(device_name)
+        for model in (float_model, ideal_model, device_model):
+            model.eval().to(device)
+        resources = RegisteredInferenceResources(
+            dataset=test.dataset, quantization=input_scales, device_lut=device_lut,
+            float_model=float_model, ideal_model=ideal_model,
+            device_model=device_model, device=device,
+        )
+        _REGISTERED_CACHE[key] = resources
+        return resources, False
 
 
 def get_resnet20_inference_resources(
@@ -381,7 +469,7 @@ def get_bnn_inference_resources(
         from .error_model import HardwareErrorModel
 
         try:
-            _train, validation, test = create_loaders(
+            calibration, _validation, test = create_loaders(
                 dataset_root, 128, 256, 42, num_workers=0
             )
         except RuntimeError as exc:
@@ -394,10 +482,11 @@ def get_bnn_inference_resources(
             ) from exc
         latent = BinaryMNIST()
         payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        latent.load_state_dict(payload.get("model_state_dict", payload))
+        state = payload.get("best_model_state_dict", payload.get("model_state_dict", payload))
+        latent.load_state_dict(state)
         frozen = latent.frozen().eval()
         input_scales = collect_input_scales(
-            frozen, validation, device_name, batches=2
+            frozen, calibration, device_name, batches=2
         )
         ideal_model, device_model = differential_models(
             frozen.cpu(), input_scales, error_model_path
@@ -450,5 +539,11 @@ def get_registered_inference_resources(
             model_root=model_root, dataset_root=dataset_root,
             checkpoint_path=checkpoint_path, error_model_path=error_model_path,
             device_name=device_name,
+        )
+    if model_id in VISION_ZOO_MODEL_IDS:
+        return get_vision_zoo_inference_resources(
+            model_id=model_id, model_root=model_root, dataset_root=dataset_root,
+            checkpoint_path=checkpoint_path, input_scales_path=auxiliary_path,
+            error_model_path=error_model_path, device_name=device_name,
         )
     raise ValueError(f"Unsupported registered inference model: {model_id}")

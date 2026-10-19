@@ -554,6 +554,41 @@ class PlatformService:
                 (_device_mode_name(error_model), resources.device_model),
             ), display_sample)
 
+        from .inference_runtime import VISION_ZOO_MODEL_IDS
+        if model_id in VISION_ZOO_MODEL_IDS:
+            auxiliary = Path(auxiliary_path).expanduser().resolve() if auxiliary_path else None
+            if auxiliary is not None and not auxiliary.is_file():
+                raise FileNotFoundError(f"{model_id} input-scales JSON is missing: {auxiliary}")
+            from .inference_runtime import get_registered_inference_resources
+
+            resources, _cache_hit = get_registered_inference_resources(
+                model_id=model_id, model_root=root / "3_models/VisionZoo",
+                dataset_root=dataset, checkpoint_path=checkpoint,
+                auxiliary_path=auxiliary, error_model_path=error_model,
+                device_name=execution_device,
+            )
+            dataset_name = "CIFAR-10" if model_id.endswith("cifar10") else "MNIST"
+            if not 0 <= sample_index < len(resources.dataset):
+                raise IndexError(
+                    f"{dataset_name} test sample index must be in "
+                    f"[0, {len(resources.dataset)-1}]"
+                )
+            sample, target = resources.dataset[sample_index]
+            if model_id.endswith("cifar10"):
+                mean_values = (0.4914, 0.4822, 0.4465)
+                std_values = (0.2023, 0.1994, 0.2010)
+            else:
+                mean_values, std_values = (0.1307,), (0.3081,)
+            channels = len(mean_values)
+            mean = torch.tensor(mean_values, dtype=sample.dtype).view(channels, 1, 1)
+            std = torch.tensor(std_values, dtype=sample.dtype).view(channels, 1, 1)
+            display_sample = (sample.cpu() * std + mean).clamp(0.0, 1.0)
+            return evaluate_modes(sample, target, (
+                ("float", resources.float_model),
+                ("ideal_differential", resources.ideal_model),
+                (_device_mode_name(error_model), resources.device_model),
+            ), display_sample)
+
         raise ValueError(f"Unsupported registered model for single-sample inference: {model_id}")
 
     @staticmethod

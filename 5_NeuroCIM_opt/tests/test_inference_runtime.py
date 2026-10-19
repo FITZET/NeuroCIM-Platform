@@ -17,6 +17,24 @@ from neurocim_opt.inference_runtime import (
     get_lenet_inference_resources,
     lenet_inference_cache_info,
 )
+
+
+def test_lenet_loader_prefers_best_error_aware_state(tmp_path: Path) -> None:
+    import torch
+
+    model_root = ROOT.parent / "3_models/LeNet_5"
+    sys.path.insert(0, str(model_root))
+    from lenet5.engine import load_checkpoint
+    from lenet5.model import LeNet5
+
+    final = LeNet5().state_dict()
+    best = {name: value.clone() for name, value in final.items()}
+    best["fc3.bias"].fill_(7.0)
+    checkpoint = tmp_path / "eat_checkpoint.pt"
+    torch.save({"model_state_dict": final, "best_model_state_dict": best}, checkpoint)
+    loaded = LeNet5()
+    load_checkpoint(loaded, checkpoint)
+    assert torch.equal(loaded.fc3.bias, best["fc3.bias"])
 from neurocim_opt.paths import data_root
 
 

@@ -21,7 +21,7 @@ class BatchInferenceRequest:
     project_root: Path
     dataset_root: Path
     checkpoint_path: Path
-    quantization_path: Path
+    quantization_path: Path | None
     error_model_path: Path
     model_id: str = "lenet5_mnist"
     device: str = "auto"
@@ -97,18 +97,29 @@ def _canonical_model_id(model_id: str) -> str:
         "tinytransformer": "tinytransformer-cifar10", "tiny-transformer": "tinytransformer-cifar10",
         "cct": "tinytransformer-cifar10", "cct-7": "tinytransformer-cifar10",
         "tinytransformer-cifar10": "tinytransformer-cifar10",
+        "resnet8": "resnet8-mnist", "resnet-8": "resnet8-mnist",
+        "resnet8_mnist": "resnet8-mnist", "resnet8-mnist": "resnet8-mnist",
+        "mobilenetv2": "mobilenetv2-cifar10", "mobilenet-v2": "mobilenetv2-cifar10",
+        "mobilenetv2-cifar10": "mobilenetv2-cifar10",
+        "vgg11": "vgg11-bn-cifar10", "vgg11-bn": "vgg11-bn-cifar10",
+        "vgg11-bn-cifar10": "vgg11-bn-cifar10",
+        "squeezenet": "squeezenet1_1-cifar10", "squeezenet1.1": "squeezenet1_1-cifar10",
+        "squeezenet1_1-cifar10": "squeezenet1_1-cifar10",
     }
     try:
         return aliases[normalized]
     except KeyError as exc:
         raise ValueError(
             "Grouped inference supports LeNet-5/MNIST, BNN/MNIST, ResNet-20/CIFAR-10 "
-            "and TinyTransformer/CIFAR-10; "
+            "TinyTransformer/CIFAR-10, ResNet-8/MNIST, MobileNetV2/CIFAR-10, "
+            "VGG11-BN/CIFAR-10, and SqueezeNet1.1/CIFAR-10; "
             f"got {model_id!r}"
         ) from exc
 
 
-def _validate(request: BatchInferenceRequest) -> tuple[str, Path, Path, Path, Path, Path]:
+def _validate(
+    request: BatchInferenceRequest,
+) -> tuple[str, Path, Path, Path, Path | None, Path]:
     model_id = _canonical_model_id(request.model_id)
     if request.sample_count <= 0 or request.sample_count > 10_000:
         raise ValueError("sample_count must be in [1, 10000] for the selected test dataset")
@@ -119,15 +130,22 @@ def _validate(request: BatchInferenceRequest) -> tuple[str, Path, Path, Path, Pa
     project = _resolved(request.project_root)
     dataset = _resolved(request.dataset_root)
     checkpoint = _resolved(request.checkpoint_path)
-    quantization = _resolved(request.quantization_path)
+    quantization = (
+        _resolved(request.quantization_path) if request.quantization_path else None
+    )
     error_model = _resolved(request.error_model_path)
-    if model_id in {"lenet5-mnist", "bnn-mnist"}:
+    if model_id in {"lenet5-mnist", "bnn-mnist", "resnet8-mnist"}:
         from .inference_runtime import mnist_required_files
         dataset_files = tuple(
             (f"MNIST {path.name}", path)
-            for path in mnist_required_files(dataset, include_training=model_id == "bnn-mnist")
+            for path in mnist_required_files(
+                dataset, include_training=model_id == "bnn-mnist"
+            )
         )
-        auxiliary_purpose = "quantization" if model_id == "lenet5-mnist" else None
+        auxiliary_purpose = (
+            None if model_id == "bnn-mnist"
+            else "quantization" if model_id == "lenet5-mnist" else "input scales"
+        )
     else:
         from .inference_runtime import cifar10_required_files
         dataset_files = tuple(
@@ -140,7 +158,7 @@ def _validate(request: BatchInferenceRequest) -> tuple[str, Path, Path, Path, Pa
             ("checkpoint", checkpoint),
             ("error model", error_model),
         ) + (() if auxiliary_purpose is None else ((auxiliary_purpose, quantization),))
-        if not path.is_file()
+        if path is None or not path.is_file()
     ]
     if missing:
         raise FileNotFoundError("Missing batch inference resources:\n" + "\n".join(missing))
@@ -179,6 +197,8 @@ def run_grouped_batch_inference(
     model_directory = {
         "lenet5-mnist": "LeNet_5", "bnn-mnist": "BNN", "resnet20-cifar10": "Resnet20",
         "tinytransformer-cifar10": "TinyTransformer",
+        "resnet8-mnist": "VisionZoo", "mobilenetv2-cifar10": "VisionZoo",
+        "vgg11-bn-cifar10": "VisionZoo", "squeezenet1_1-cifar10": "VisionZoo",
     }[model_id]
     model_root = project / "3_models" / model_directory
     resources, cache_hit = get_registered_inference_resources(
@@ -261,7 +281,7 @@ def run_grouped_batch_inference(
         "error_model": str(error_model),
     }
     if model_id == "bnn-mnist":
-        resource_paths["input_scales"] = "runtime calibration from MNIST validation samples"
+        resource_paths["input_scales"] = "runtime calibration from MNIST training samples"
     else:
         resource_paths["quantization" if model_id == "lenet5-mnist" else "input_scales"] = str(quantization)
     outcome = GroupedBatchInferenceOutcome(

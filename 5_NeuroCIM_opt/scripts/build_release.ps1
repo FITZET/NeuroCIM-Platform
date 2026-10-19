@@ -70,6 +70,7 @@ $resourceDirectories = @(
     "3_models\Resnet20\checkpoint",
     "3_models\Resnet20\output\formal",
     "3_models\TinyTransformer\checkpoint",
+    "3_models\VisionZoo\checkpoint",
     "3_models\GPT2\checkpoint\tokenizer",
     "data\mnist",
     "data\cifar10",
@@ -98,8 +99,10 @@ Copy-ResourceTree (Join-Path $project "3_models\BNN\checkpoint") (Join-Path $por
 Copy-ResourceTree (Join-Path $project "3_models\Resnet20\checkpoint") (Join-Path $portable "3_models\Resnet20\checkpoint")
 Copy-Item -LiteralPath (Join-Path $project "3_models\Resnet20\output\formal\input_scales.json") -Destination (Join-Path $portable "3_models\Resnet20\output\formal\input_scales.json") -Force
 Copy-ResourceTree (Join-Path $project "3_models\TinyTransformer\checkpoint") (Join-Path $portable "3_models\TinyTransformer\checkpoint")
+Copy-ResourceTree (Join-Path $project "3_models\VisionZoo\checkpoint") (Join-Path $portable "3_models\VisionZoo\checkpoint")
 Copy-ResourceTree (Join-Path $project "3_models\GPT2\checkpoint") (Join-Path $portable "3_models\GPT2\checkpoint")
 Copy-ResourceTree (Join-Path $project "0_data") (Join-Path $portable "0_data")
+Copy-Item -LiteralPath (Join-Path $platform "model_resource_manifest.json") -Destination $portable -Force
 
 $mnistSource = Join-Path $project "data\mnist\MNIST\raw"
 $mnistTarget = Join-Path $portable "data\mnist\MNIST\raw"
@@ -124,7 +127,10 @@ Copy-Item -LiteralPath $resourceGuide.FullName -Destination $portable
 Copy-Item -LiteralPath (Join-Path $platform "THIRD_PARTY_NOTICES.md") -Destination $portable
 Copy-Item -LiteralPath (Join-Path $platform "vendor\neurosim\README.md") -Destination (Join-Path $licensesTarget "NeuroSim_README.md")
 Copy-Item -LiteralPath (Join-Path $project "3_models\TinyTransformer\LICENSE") -Destination (Join-Path $licensesTarget "Compact_Transformers_LICENSE.txt")
+Copy-Item -LiteralPath (Join-Path $project "3_models\VisionZoo\LICENSE-chenyaofo.txt") -Destination (Join-Path $licensesTarget "pytorch-cifar-models_LICENSE.txt")
+Copy-Item -LiteralPath (Join-Path $project "3_models\VisionZoo\LICENSE-torchvision.txt") -Destination (Join-Path $licensesTarget "torchvision_LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $project "3_models\GPT2\LICENSE") -Destination (Join-Path $licensesTarget "nanoGPT_LICENSE.txt")
+Copy-ResourceTree (Join-Path $project "3_models\GPT2\licenses") (Join-Path $licensesTarget "GPT2_and_WikiText2")
 
 $smokeImage = Join-Path $releaseRoot "release_smoke.png"
 python (Join-Path $platform "scripts\verify_frozen_app.py") (Join-Path $appTarget "NeuroCIM.exe") $smokeImage
@@ -141,7 +147,7 @@ $manifest = [ordered]@{
     total_bytes = ($manifestFiles | Measure-Object Length -Sum).Sum
     executable_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appTarget "NeuroCIM.exe")).Hash.ToLowerInvariant()
     external_assets = @()
-    bundled_assets = @("five model checkpoints", "MNIST", "CIFAR-10", "device measurement CSV")
+    bundled_assets = @("ten model checkpoints", "MNIST", "CIFAR-10", "WikiText-2 raw-v1", "device measurement CSV")
     neurosim_license = "CC BY-NC 4.0"
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $portable "release_manifest.json") -Encoding UTF8

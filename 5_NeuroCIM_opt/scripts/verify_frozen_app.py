@@ -20,6 +20,8 @@ def main() -> int:
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment["NEUROCIM_RELEASE_SMOKE_SCREENSHOT"] = str(screenshot)
     gpt_result = screenshot.with_name("release_gpt_smoke.txt")
+    version_result = screenshot.with_name("release_version_smoke.txt")
+    expected_version = os.environ.get("NEUROCIM_RELEASE_EXPECTED_VERSION")
     settings = QSettings("DRAM-CIM", "NeuroSimPlatform")
     saved_settings = {key: settings.value(key) for key in settings.allKeys()}
     settings.clear()
@@ -44,6 +46,17 @@ def main() -> int:
             timeout=180,
             check=False,
         )
+        version_environment = environment.copy()
+        version_environment.pop("NEUROCIM_RELEASE_SMOKE_SCREENSHOT", None)
+        version_environment["NEUROCIM_RELEASE_VERSION_RESULT"] = str(version_result)
+        version_completed = subprocess.run(
+            [str(executable), "--release-version-smoke"],
+            env=version_environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
     finally:
         settings.clear()
         for key, value in saved_settings.items():
@@ -63,8 +76,16 @@ def main() -> int:
         )
     if not gpt_result.is_file() or not gpt_result.read_text(encoding="utf-8").startswith("ok:"):
         raise RuntimeError(f"frozen GPT-2 smoke did not create a success result: {gpt_result}")
+    if version_completed.returncode != 0 or not version_result.is_file():
+        raise RuntimeError("frozen application version smoke failed")
+    frozen_version = version_result.read_text(encoding="utf-8").strip()
+    if expected_version and frozen_version != expected_version:
+        raise RuntimeError(
+            f"frozen application version mismatch: expected {expected_version}, got {frozen_version}"
+        )
     print(f"frozen smoke passed: {screenshot}")
     print(f"frozen GPT-2 tokenizer smoke passed: {gpt_result}")
+    print(f"frozen application version: {frozen_version}")
     return 0
 
 

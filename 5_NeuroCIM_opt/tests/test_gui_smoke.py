@@ -21,12 +21,14 @@ from PySide6.QtWidgets import QApplication, QScrollArea
 from neurocim_opt.gui import (
     BatchInferenceWidget, CellFittingWidget, MacAnalysisWidget, MainWindow, ModelCatalogWidget,
     PpaEvaluationWidget, SingleInferenceWidget, ErrorAwareTrainingWidget, GPT2GenerationWidget,
+    GPT2BatchInferenceWidget, WikiText2EvaluationWidget,
     UnifiedBatchInferenceWidget, UnifiedSingleInferenceWidget,
     WorkflowCoordinator, QComboBox,
 )
 from neurocim_opt.application import CellFitOutcome
 from neurocim_opt.error_model import HardwareErrorModel
 from neurocim_opt.paths import data_root
+from neurocim_opt.model_registry import builtin_registry
 from neurocim_opt.workflow import WorkflowContext
 
 
@@ -58,16 +60,13 @@ def test_main_window_shows_live_model_catalog() -> None:
     assert all(tabs.tabText(index) != "NeuroSim PPA" for index in range(tabs.count()))
     catalog = tabs.widget(1).findChild(ModelCatalogWidget)
     assert catalog is not None
-    assert catalog.table.rowCount() == 5
+    assert catalog.table.rowCount() == len(builtin_registry(ROOT).list())
     rows = {
         catalog.table.item(row, 1).text(): catalog.table.item(row, 7).text()
         for row in range(catalog.table.rowCount())
     }
-    assert set(rows) == {
-        "bnn-mnist", "gpt2-small", "lenet5-mnist", "resnet20-cifar10",
-        "tinytransformer-cifar10",
-    }
-    assert len(set(rows.values())) == 1
+    assert set(rows) == {item.model_id for item in builtin_registry(ROOT).list()}
+    assert rows["squeezenet1_1-cifar10"] == rows["mobilenetv2-cifar10"]
     single = tabs.widget(2).findChild(UnifiedSingleInferenceWidget)
     batch = tabs.widget(3).findChild(UnifiedBatchInferenceWidget)
     assert single is not None and batch is not None
@@ -179,6 +178,45 @@ def test_catalog_selection_drives_single_and_batch_task_views(tmp_path: Path) ->
     single.close(); batch.close()
 
 
+def test_gpt2_large_selection_updates_generation_batch_and_wikitext_resources() -> None:
+    application = QApplication.instance() or QApplication([])
+    coordinator = WorkflowCoordinator(ROOT)
+    large = coordinator.model_registry.get("gpt2-large")
+    single = UnifiedSingleInferenceWidget(ROOT.parent, coordinator=coordinator)
+    batch = UnifiedBatchInferenceWidget(ROOT.parent, coordinator=coordinator)
+    single.apply_model_selection("gpt2-large")
+    batch.apply_model_selection("gpt2-large")
+    application.processEvents()
+
+    assert single.stack.currentWidget() is single.gpt_widget
+    assert single.gpt_widget._request().model_variant == "gpt2-large"
+    assert Path(single.gpt_widget.checkpoint_edit.text()) == large.checkpoint
+    assert Path(single.gpt_widget.tokenizer_edit.text()) == large.checkpoint.parent
+    assert batch.stack.currentWidget() is batch.gpt_widget
+    assert all(request.model_variant == "gpt2-large" for request in batch.gpt_widget._requests())
+    evaluation = batch.findChild(WikiText2EvaluationWidget)
+    assert evaluation is not None and not evaluation.isHidden()
+    evaluation_request = evaluation._request()
+    assert evaluation_request.model_variant == "gpt2-large"
+    assert evaluation_request.batch_size == 1
+    assert evaluation_request.dataset_path == large.dataset_root
+    single.close(); batch.close()
+
+
+def test_catalog_never_enables_partial_gpt2_large_download() -> None:
+    application = QApplication.instance() or QApplication([])
+    coordinator = WorkflowCoordinator(ROOT)
+    widget = ModelCatalogWidget(ROOT.parent, coordinator=coordinator)
+    large = coordinator.model_registry.get("gpt2-large")
+    row = next(index for index, spec in enumerate(widget.specs) if spec.model_id == "gpt2-large")
+    selector = widget.table.cellWidget(row, 0)
+    assert selector.isEnabled() == large.resources_available
+    partial = large.checkpoint.with_name(large.checkpoint.name + ".partial")
+    if partial.exists() and not large.checkpoint.exists():
+        assert not selector.isEnabled()
+    widget.close()
+
+
 def test_real_single_sample_inference_offscreen() -> None:
     application = QApplication.instance() or QApplication([])
     widget = SingleInferenceWidget(ROOT.parent)
@@ -242,6 +280,30 @@ def test_single_inference_model_selection_updates_resources() -> None:
     assert "TinyTransformer" in widget.checkpoint_edit.text()
     assert widget.checkpoint_edit.text().endswith("cct_7_3x1_32_cifar10.pth")
     assert widget.auxiliary_edit.text().endswith("input_scales.json")
+    expected = {
+        "resnet8-mnist": ("MNIST", "resnet8_mnist.pt", "resnet8-mnist_input_scales.json"),
+        "mobilenetv2-cifar10": (
+            "CIFAR-10", "cifar10_mobilenetv2_x1_0-fe6a5b48.pt",
+            "mobilenetv2-cifar10_input_scales.json",
+        ),
+        "vgg11-bn-cifar10": (
+            "CIFAR-10", "cifar10_vgg11_bn-eaeebf42.pt",
+            "vgg11-bn-cifar10_input_scales.json",
+        ),
+        "squeezenet1_1-cifar10": (
+            "CIFAR-10", "squeezenet1_1_cifar10.pt",
+            "squeezenet1_1-cifar10_input_scales.json",
+        ),
+    }
+    for model_id, (dataset, checkpoint_name, auxiliary_name) in expected.items():
+        index = widget.model_combo.findData(model_id)
+        assert index >= 0 and widget.model_combo.model().item(index).isEnabled()
+        widget.model_combo.setCurrentIndex(index)
+        assert widget.dataset_name.text() == dataset
+        assert Path(widget.checkpoint_edit.text()).name == checkpoint_name
+        assert Path(widget.auxiliary_edit.text()).name == auxiliary_name
+        assert widget.auxiliary_edit.isEnabled() is True
+        assert widget.auxiliary_label.text() == "量化/输入尺度参数"
     assert "资源状态" in widget.resource_status.text()
     if not (Path(widget.dataset_edit.text()) / "cifar-10-batches-py/test_batch").is_file():
         assert "未就绪" in widget.resource_status.text()

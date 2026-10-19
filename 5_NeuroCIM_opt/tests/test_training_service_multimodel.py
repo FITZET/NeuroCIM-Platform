@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from neurocim_opt.training_service import (
-    ErrorAwareTrainingService, TrainingCancelled, TrainingRequest,
+    ErrorAwareTrainingService, TrainingCancelled, TrainingRequest, TrainingResources,
+    TINYTRANSFORMER_EVAL_BATCH_LIMIT,
     _configure_tinytransformer_head_finetuning, canonical_model_id,
 )
 
@@ -19,6 +20,10 @@ from neurocim_opt.training_service import (
     ("BNN", "bnn-mnist"),
     ("resnet-20", "resnet20-cifar10"),
     ("CCT-7", "tinytransformer-cifar10"),
+    ("ResNet-8", "resnet8-mnist"),
+    ("MobileNet-V2", "mobilenetv2-cifar10"),
+    ("VGG11-BN", "vgg11-bn-cifar10"),
+    ("SqueezeNet1.1", "squeezenet1_1-cifar10"),
 ])
 def test_canonical_model_aliases(alias: str, expected: str) -> None:
     assert canonical_model_id(alias) == expected
@@ -39,6 +44,14 @@ def _file(path: Path, content: str = "x") -> Path:
     ("tinytransformer-cifar10", "cifar10",
      "3_models/TinyTransformer/checkpoint/model.pth",
      "3_models/TinyTransformer/checkpoint/input_scales.json"),
+    ("resnet8-mnist", "mnist", "3_models/VisionZoo/checkpoint/resnet8.pt",
+     "3_models/VisionZoo/checkpoint/resnet8-mnist_input_scales.json"),
+    ("mobilenetv2-cifar10", "cifar10", "3_models/VisionZoo/checkpoint/mobile.pt",
+     "3_models/VisionZoo/checkpoint/mobilenetv2-cifar10_input_scales.json"),
+    ("vgg11-bn-cifar10", "cifar10", "3_models/VisionZoo/checkpoint/vgg.pt",
+     "3_models/VisionZoo/checkpoint/vgg11-bn-cifar10_input_scales.json"),
+    ("squeezenet1_1-cifar10", "cifar10", "3_models/VisionZoo/checkpoint/squeeze.pt",
+     "3_models/VisionZoo/checkpoint/squeezenet1_1-cifar10_input_scales.json"),
 ])
 def test_validation_resolves_each_model_and_dataset(
     tmp_path: Path, model_id: str, dataset_name: str,
@@ -48,6 +61,8 @@ def test_validation_resolves_each_model_and_dataset(
         "lenet5-mnist": "LeNet_5", "bnn-mnist": "BNN",
         "resnet20-cifar10": "Resnet20",
         "tinytransformer-cifar10": "TinyTransformer",
+        "resnet8-mnist": "VisionZoo", "mobilenetv2-cifar10": "VisionZoo",
+        "vgg11-bn-cifar10": "VisionZoo", "squeezenet1_1-cifar10": "VisionZoo",
     }[model_id]
     (tmp_path / "3_models" / model_folder).mkdir(parents=True)
     checkpoint_path = _file(tmp_path / checkpoint)
@@ -122,3 +137,50 @@ def test_tinytransformer_finetuning_freezes_backbone() -> None:
         "classifier.fc.weight", "classifier.fc.bias",
     }
     assert sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad) == 2_827
+
+
+def test_tinytransformer_training_uses_two_heads_but_evaluation_uses_full_graph(
+    tmp_path: Path,
+) -> None:
+    import torch
+    from neurocim_opt.layers import DifferentialConv2d, DifferentialLinear
+
+    project = ROOT.parent
+    model_root = project / "3_models/TinyTransformer"
+    checkpoint = model_root / "checkpoint/cct_7_3x1_32_cifar10.pth"
+    scales = model_root / "checkpoint/input_scales.json"
+    dataset = project / "data/cifar10"
+    if not all(path.exists() for path in (checkpoint, scales, dataset / "cifar-10-batches-py/test_batch")):
+        pytest.skip("TinyTransformer resources are not installed")
+    resources = TrainingResources(
+        "tinytransformer-cifar10", "cifar10", model_root, checkpoint, scales,
+        tmp_path / "unused-error-model.json", dataset, torch.device("cpu"),
+    )
+    request = TrainingRequest(
+        project, resources.error_model, tmp_path / "out", model_id=resources.model_id,
+        dataset_root=dataset, checkpoint_path=checkpoint, auxiliary_path=scales,
+    )
+    loaders, base, training_converter, evaluation_converter, _state = (
+        ErrorAwareTrainingService()._prepare(resources, request)
+    )
+    codes = torch.arange(256, dtype=torch.int64)
+    lut = codes[:, None] * codes[None, :]
+    training_model = training_converter(base(), lut, True)
+    evaluation_model = evaluation_converter(base(), lut, False)
+    differential_types = (DifferentialConv2d, DifferentialLinear)
+    training_names = {
+        name for name, module in training_model.named_modules()
+        if isinstance(module, differential_types)
+    }
+    evaluation_names = {
+        name for name, module in evaluation_model.named_modules()
+        if isinstance(module, differential_types)
+    }
+    all_mac_names = {
+        name for name, module in base().named_modules()
+        if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear))
+    }
+    assert training_names == {"classifier.attention_pool", "classifier.fc"}
+    assert evaluation_names == all_mac_names
+    assert len(evaluation_names) == 31
+    assert loaders[2].batch_size == TINYTRANSFORMER_EVAL_BATCH_LIMIT

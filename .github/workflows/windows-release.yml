@@ -85,7 +85,14 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force runtime-assets | Out-Null
-          gh release download runtime-assets-v1 --repo Lowpower-Lab/NeuroCIM-Distribution --pattern 'runtime-assets.zip' --dir runtime-assets
+          gh release download runtime-assets-v1 --repo Lowpower-Lab/NeuroCIM-Distribution --pattern 'runtime-assets.zip*' --dir runtime-assets
+          if (-not (Test-Path -LiteralPath runtime-assets/runtime-assets.zip)) {
+            $partsManifest = Get-ChildItem -LiteralPath runtime-assets -Filter 'runtime-assets.zip.parts.json' -File | Select-Object -First 1
+            if ($null -eq $partsManifest) { throw 'Runtime assets archive or parts manifest is missing' }
+            python 5_NeuroCIM_opt/scripts/manage_gpt2_large_resources.py assemble `
+              --parts-manifest $partsManifest.FullName --output runtime-assets/runtime-assets.zip
+            if ($LASTEXITCODE -ne 0) { throw 'Runtime assets parts failed SHA256 verification' }
+          }
           Expand-Archive runtime-assets/runtime-assets.zip -DestinationPath . -Force
       - name: Build ${{ matrix.flavor }} installer
         shell: pwsh

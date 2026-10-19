@@ -67,6 +67,39 @@ def test_asymmetric_lut_axis_order_and_explicit_signed_branches() -> None:
     assert torch.allclose(layer(sample), explicit_linear(layer, sample), atol=1e-6)
 
 
+def test_half_linear_scales_integer_accumulator_in_float32() -> None:
+    """A large integer MAC must not overflow before its small scales apply."""
+    layer = DifferentialLinear(
+        64, 2, lut=ideal_lut(), input_scale=1.0 / 255.0,
+        weight_scale=torch.full((2,), 1.0 / 255.0), bias=False,
+        dtype=torch.float16,
+    )
+    with torch.no_grad():
+        layer.weight.fill_(1.0)
+    result = layer(torch.ones(1, 64, dtype=torch.float16))
+    assert torch.isfinite(result).all()
+    assert torch.allclose(result.float(), torch.full((1, 2), 64.0), atol=0.05)
+
+
+def test_half_chained_linear_does_not_create_invalid_lut_indices() -> None:
+    first = DifferentialLinear(
+        64, 4, lut=ideal_lut(), input_scale=1.0 / 255.0,
+        weight_scale=torch.full((4,), 1.0 / 255.0), bias=False,
+        dtype=torch.float16,
+    )
+    second = DifferentialLinear(
+        4, 1, lut=ideal_lut(), input_scale=64.0 / 255.0,
+        weight_scale=torch.tensor([1.0 / 255.0]), bias=False,
+        dtype=torch.float16,
+    )
+    with torch.no_grad():
+        first.weight.fill_(1.0)
+        second.weight.fill_(1.0)
+    result = second(first(torch.ones(1, 64, dtype=torch.float16)))
+    assert torch.isfinite(result).all()
+    assert result.item() == pytest.approx(256.0, abs=0.5)
+
+
 def test_conv_matches_unfolded_linear_reference_with_padding() -> None:
     torch.manual_seed(3)
     layer = DifferentialConv2d(

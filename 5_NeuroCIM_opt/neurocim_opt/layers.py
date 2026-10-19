@@ -15,7 +15,15 @@ def _as_channel_values(value: float | Tensor, channels: int, device: torch.devic
 
 
 def _quantize_magnitude(value: Tensor, scale: Tensor) -> Tensor:
-    return torch.clamp(torch.round(torch.abs(value) / scale), 0, 255).to(torch.int64)
+    # Quantize with the high-precision scale even when the model uses FP16.
+    # Saturating non-finite magnitudes prevents integer conversion from producing
+    # an invalid negative LUT index; infinity has the same ADC-code semantics
+    # as any other value above the representable range.
+    # Preserve the configured scale's precision so existing quantization
+    # boundaries remain bit-for-bit compatible with FP32 execution.
+    normalized = torch.abs(value) / scale.to(value.device)
+    normalized = torch.nan_to_num(normalized, nan=0.0, posinf=255.0, neginf=0.0)
+    return torch.clamp(torch.round(normalized), 0, 255).to(torch.int64)
 
 
 def _signed_lut_product(lut: Tensor, x: Tensor, w: Tensor, x_scale: Tensor, w_scale: Tensor) -> Tensor:
@@ -24,7 +32,9 @@ def _signed_lut_product(lut: Tensor, x: Tensor, w: Tensor, x_scale: Tensor, w_sc
     qx = _quantize_magnitude(x, x_scale)
     qw = _quantize_magnitude(w, w_scale)
     magnitude = lut[qw, qx]
-    sign = torch.sign(x).to(torch.int64) * torch.sign(w).to(torch.int64)
+    safe_x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+    safe_w = torch.nan_to_num(w, nan=0.0, posinf=1.0, neginf=-1.0)
+    sign = torch.sign(safe_x).to(torch.int64) * torch.sign(safe_w).to(torch.int64)
     return magnitude * sign
 
 
@@ -154,12 +164,20 @@ class DifferentialLinear(DifferentialLayerMixin, nn.Linear):
                     w_scale,
                 ).sum(dim=-1)
             )
-        exact = accumulator.to(input.dtype) * (
-            self.input_scale.to(input.device, input.dtype)
-            * self.weight_scale.to(input.device, input.dtype).view(1, -1)
+        # int64 MAC totals can exceed the finite FP16 range before the small
+        # quantization scales are applied.  Scale in FP32, then cast back, so
+        # GPT-2-large FP16 inference does not create inf/NaN LUT indices in the
+        # following differential layer.
+        compute_dtype = (
+            torch.float32 if input.dtype in (torch.float16, torch.bfloat16) else input.dtype
+        )
+        exact = accumulator.to(compute_dtype) * (
+            self.input_scale.to(input.device, compute_dtype)
+            * self.weight_scale.to(input.device, compute_dtype).view(1, -1)
         )
         if self.bias is not None:
-            exact = exact + self.bias
+            exact = exact + self.bias.to(compute_dtype)
+        exact = exact.to(input.dtype)
         exact = exact.reshape(*input.shape[:-1], self.out_features)
         if not self.ste:
             return exact
@@ -260,12 +278,16 @@ class DifferentialConv2d(DifferentialLayerMixin, nn.Conv2d):
                 group_acc.add_(
                     _signed_lut_product(lut, x, w, x_scale, group_scales).sum(dim=-1)
                 )
-        exact = accumulator.to(input.dtype) * (
-            self.input_scale.to(input.device, input.dtype)
-            * w_scale_all.to(input.device, input.dtype).view(1, -1, 1)
+        compute_dtype = (
+            torch.float32 if input.dtype in (torch.float16, torch.bfloat16) else input.dtype
+        )
+        exact = accumulator.to(compute_dtype) * (
+            self.input_scale.to(input.device, compute_dtype)
+            * w_scale_all.to(input.device, compute_dtype).view(1, -1, 1)
         )
         if self.bias is not None:
-            exact = exact + self.bias.view(1, -1, 1)
+            exact = exact + self.bias.to(compute_dtype).view(1, -1, 1)
+        exact = exact.to(input.dtype)
         height = (
             input.shape[-2] + 2 * self.padding[0]
             - self.dilation[0] * (self.kernel_size[0] - 1) - 1

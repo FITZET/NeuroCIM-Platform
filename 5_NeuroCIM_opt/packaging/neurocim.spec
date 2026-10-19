@@ -14,6 +14,7 @@ SEARCH_ROOTS = [
     PROJECT / "3_models" / "Resnet20",
     PROJECT / "3_models" / "BNN",
     PROJECT / "3_models" / "TinyTransformer",
+    PROJECT / "3_models" / "VisionZoo",
     PROJECT / "3_models" / "GPT2",
 ]
 for root in reversed(SEARCH_ROOTS):
@@ -22,8 +23,8 @@ for root in reversed(SEARCH_ROOTS):
 hiddenimports = []
 for package in (
     "data_fitting", "fault_layers", "lenet5", "resnet20", "bnn",
-    "tiny_transformer", "gpt2_cim", "boto3", "botocore", "s3transfer", "jmespath",
-    "keyring",
+    "tiny_transformer", "vision_zoo", "gpt2_cim", "boto3", "botocore", "s3transfer", "jmespath",
+    "keyring", "safetensors",
 ):
     hiddenimports.extend(collect_submodules(package))
 hiddenimports.extend([

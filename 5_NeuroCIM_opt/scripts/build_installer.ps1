@@ -1,7 +1,9 @@
 param(
     [ValidateSet("CPU", "GPU")]
+    [Parameter(Mandatory = $true)]
     [string]$Flavor,
     [ValidatePattern("^\d+\.\d+\.\d+$")]
+    [Parameter(Mandatory = $true)]
     [string]$Version,
     [string]$ClientId = $env:NEUROCIM_GITHUB_CLIENT_ID,
     [switch]$SkipTests,
@@ -18,8 +20,17 @@ if (-not $ClientId) {
     throw "Set NEUROCIM_GITHUB_CLIENT_ID or pass -ClientId so authenticated updates can work."
 }
 $releaseConfig = Join-Path $platform "neurocim_opt\release_config.py"
+$versionModule = Join-Path $platform "neurocim_opt\version.py"
 $originalReleaseConfig = [System.IO.File]::ReadAllText($releaseConfig)
+$originalVersionModule = [System.IO.File]::ReadAllText($versionModule)
+$originalExpectedVersion = $env:NEUROCIM_RELEASE_EXPECTED_VERSION
 try {
+    [System.IO.File]::WriteAllText(
+        $versionModule,
+        "`"`"`"Application version shared by the GUI, installer and update client.`"`"`"`r`n`r`n__version__ = `"$Version`"`r`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    $env:NEUROCIM_RELEASE_EXPECTED_VERSION = $Version
     python (Join-Path $platform "scripts\configure_release.py") --client-id $ClientId
     if ($LASTEXITCODE -ne 0) { throw "Release configuration failed" }
 
@@ -28,6 +39,14 @@ try {
     $torchFlavor = ($torchFlavor | Out-String).Trim()
     if ($torchFlavor -ne $Flavor) {
         throw "This environment contains the $torchFlavor PyTorch build; use a $Flavor build environment."
+    }
+    if ($Flavor -eq "GPU") {
+        # GitHub-hosted Windows runners do not expose an NVIDIA device. This
+        # gate verifies the CUDA wheel and torch_cuda.dll without claiming that
+        # real CUDA execution occurred; run gpu_release_smoke.py without
+        # --build-only on a local/self-hosted NVIDIA runner before publication.
+        python (Join-Path $platform "scripts\gpu_release_smoke.py") --build-only
+        if ($LASTEXITCODE -ne 0) { throw "GPU PyTorch build/DLL validation failed" }
     }
 
     $buildArgs = @{
@@ -44,6 +63,20 @@ finally {
         $originalReleaseConfig,
         [System.Text.UTF8Encoding]::new($false)
     )
+    [System.IO.File]::WriteAllText(
+        $versionModule,
+        $originalVersionModule,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    $env:NEUROCIM_RELEASE_EXPECTED_VERSION = $originalExpectedVersion
+}
+
+if ($Flavor -eq "GPU") {
+    $bundledCudaDll = Join-Path $portable "NeuroCIM\_internal\torch\lib\torch_cuda.dll"
+    if (-not (Test-Path -LiteralPath $bundledCudaDll -PathType Leaf)) {
+        throw "Frozen GPU application is missing torch_cuda.dll: $bundledCudaDll"
+    }
+    Write-Output "Frozen GPU CUDA DLL verified: $bundledCudaDll"
 }
 
 $manifestPath = Join-Path $portable "release_manifest.json"

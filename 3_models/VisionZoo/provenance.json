@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "chenyaofo": {
+      "repository": "https://github.com/chenyaofo/pytorch-cifar-models",
+      "commit": "786c16252c0fc58ee9adac063f8337cc4a7a497a",
+      "license": "BSD-3-Clause"
+    },
+    "chenyaofo_training": {
+      "repository": "https://github.com/chenyaofo/image-classification-codebase",
+      "commit": "610e6523ab462351700aaf629e6c739a9a30e903",
+      "configuration": "conf/cifar10.conf"
+    },
+    "torchvision": {
+      "repository": "https://github.com/pytorch/vision",
+      "version": "v0.19.0",
+      "commit": "48b1edffdc6f34b766e2b4bbf23b78bd4df94181",
+      "license": "BSD-3-Clause"
+    }
+  },
+  "weights": {
+    "mobilenetv2-cifar10": {
+      "filename": "cifar10_mobilenetv2_x1_0-fe6a5b48.pt",
+      "url": "https://github.com/chenyaofo/pytorch-cifar-models/releases/download/mobilenetv2/cifar10_mobilenetv2_x1_0-fe6a5b48.pt",
+      "sha256": "fe6a5b4808c9b1b7a440c02fa19a10dc3d8ea5c63e38381b2f60b1937958735e",
+      "reported_top1_percent": 93.79
+    },
+    "vgg11-bn-cifar10": {
+      "filename": "cifar10_vgg11_bn-eaeebf42.pt",
+      "url": "https://github.com/chenyaofo/pytorch-cifar-models/releases/download/vgg/cifar10_vgg11_bn-eaeebf42.pt",
+      "sha256": "eaeebf42370c92fdfbb5dbe8eba7c27d4eb7366a1dca0b5be435364ccdf54378",
+      "reported_top1_percent": 92.79
+    },
+    "resnet8-mnist": {
+      "filename": "resnet8_mnist.pt",
+      "origin": "trained locally from the documented open-source architecture",
+      "sha256": "b5130a0b3234d947dd0cbabb90f11631c1e25f23289c55cbc4a41b7ee0a986ed",
+      "training_seed": 42,
+      "test_accuracy": 0.9936,
+      "test_samples": 10000
+    },
+    "squeezenet1_1-cifar10": {
+      "filename": "squeezenet1_1_cifar10.pt",
+      "sha256": "df967fd502b9d8fe2e7dea77d8363ad7fe14df04efcc173df1f94fc05f7cfe4c",
+      "training": "local reproducible training, seed 42, 100 epochs",
+      "best_validation_accuracy": 0.7716,
+      "test_accuracy": 0.7654
+    }
+  }
+}

@@ -72,7 +72,8 @@ ProgressCallback = Callable[[int, str, dict | None], None]
 CancelCallback = Callable[[], bool]
 
 TINYTRANSFORMER_TRAIN_BATCH_LIMIT = 128
-TINYTRANSFORMER_EVAL_BATCH_LIMIT = 256
+TINYTRANSFORMER_EVAL_BATCH_LIMIT = 16
+VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT = 4
 TINYTRANSFORMER_FINETUNE_MODULES = (
     "classifier.attention_pool",
     "classifier.fc",
@@ -88,6 +89,14 @@ _MODEL_ALIASES = {
     "tinytransformer": "tinytransformer-cifar10", "tiny-transformer": "tinytransformer-cifar10",
     "cct": "tinytransformer-cifar10", "cct-7": "tinytransformer-cifar10",
     "tinytransformer-cifar10": "tinytransformer-cifar10",
+    "resnet8": "resnet8-mnist", "resnet-8": "resnet8-mnist",
+    "resnet8_mnist": "resnet8-mnist", "resnet8-mnist": "resnet8-mnist",
+    "mobilenetv2": "mobilenetv2-cifar10", "mobilenet-v2": "mobilenetv2-cifar10",
+    "mobilenetv2-cifar10": "mobilenetv2-cifar10",
+    "vgg11": "vgg11-bn-cifar10", "vgg11-bn": "vgg11-bn-cifar10",
+    "vgg11-bn-cifar10": "vgg11-bn-cifar10",
+    "squeezenet": "squeezenet1_1-cifar10", "squeezenet1.1": "squeezenet1_1-cifar10",
+    "squeezenet1_1-cifar10": "squeezenet1_1-cifar10",
 }
 
 
@@ -96,7 +105,7 @@ def canonical_model_id(value: str) -> str:
         return _MODEL_ALIASES[value.strip().lower()]
     except KeyError as exc:
         raise ValueError(
-            f"Unsupported training model {value!r}; choose LeNet-5, BNN, ResNet-20, or TinyTransformer"
+            f"Unsupported training model {value!r}; choose a registered image classifier"
         ) from exc
 
 
@@ -208,6 +217,26 @@ class ErrorAwareTrainingService:
                 root / "3_models/TinyTransformer/checkpoint/cct_7_3x1_32_cifar10.pth",
                 root / "3_models/TinyTransformer/checkpoint/input_scales.json",
             ),
+            "resnet8-mnist": (
+                "mnist", root / "3_models/VisionZoo",
+                root / "3_models/VisionZoo/checkpoint/resnet8_mnist.pt",
+                root / "3_models/VisionZoo/checkpoint/resnet8-mnist_input_scales.json",
+            ),
+            "mobilenetv2-cifar10": (
+                "cifar10", root / "3_models/VisionZoo",
+                root / "3_models/VisionZoo/checkpoint/cifar10_mobilenetv2_x1_0-fe6a5b48.pt",
+                root / "3_models/VisionZoo/checkpoint/mobilenetv2-cifar10_input_scales.json",
+            ),
+            "vgg11-bn-cifar10": (
+                "cifar10", root / "3_models/VisionZoo",
+                root / "3_models/VisionZoo/checkpoint/cifar10_vgg11_bn-eaeebf42.pt",
+                root / "3_models/VisionZoo/checkpoint/vgg11-bn-cifar10_input_scales.json",
+            ),
+            "squeezenet1_1-cifar10": (
+                "cifar10", root / "3_models/VisionZoo",
+                root / "3_models/VisionZoo/checkpoint/squeezenet1_1_cifar10.pt",
+                root / "3_models/VisionZoo/checkpoint/squeezenet1_1-cifar10_input_scales.json",
+            ),
         }
         dataset_name, model_root, default_checkpoint, default_auxiliary = defaults[model_id]
         checkpoint = Path(request.checkpoint_path or default_checkpoint).expanduser().resolve()
@@ -215,7 +244,7 @@ class ErrorAwareTrainingService:
         auxiliary = Path(auxiliary_value).expanduser().resolve() if auxiliary_value else None
         error_model = Path(request.error_model_path).expanduser().resolve()
         required = [checkpoint, error_model]
-        if model_id in {"lenet5-mnist", "resnet20-cifar10", "tinytransformer-cifar10"}:
+        if model_id != "bnn-mnist":
             required.append(auxiliary)
         missing = [str(path or "<auxiliary parameter file>") for path in required if path is None or not path.is_file()]
         if not model_root.is_dir():
@@ -258,6 +287,12 @@ class ErrorAwareTrainingService:
                 max(request.batch_size, TINYTRANSFORMER_TRAIN_BATCH_LIMIT),
                 TINYTRANSFORMER_EVAL_BATCH_LIMIT,
             )
+        elif resources.model_id in {
+            "resnet8-mnist", "mobilenetv2-cifar10", "vgg11-bn-cifar10",
+            "squeezenet1_1-cifar10",
+        }:
+            train_batch_size = min(request.batch_size, VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT)
+            eval_batch_size = min(request.batch_size, VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT)
         else:
             train_batch_size = request.batch_size
             # Differential LUT layers use substantially more temporary memory than
@@ -290,7 +325,7 @@ class ErrorAwareTrainingService:
             def differential(model, lut, ste):
                 return configure_differential_model(model, parameters, lut, ste=ste)
 
-            return loaders, base, differential, state
+            return loaders, base, differential, differential, state
 
         if resources.model_id == "bnn-mnist":
             from bnn.data import create_loaders
@@ -309,7 +344,7 @@ class ErrorAwareTrainingService:
                 return model
 
             scales = collect_input_scales(
-                base().frozen(), loaders[1], str(resources.device), batches=1
+                base().frozen(), loaders[0], str(resources.device), batches=1
             )
 
             def differential(model, lut, ste):
@@ -320,12 +355,50 @@ class ErrorAwareTrainingService:
                     graph, lut=torch.as_tensor(lut), input_scales=scales, ste=ste
                 )
 
-            return loaders, base, differential, state
+            return loaders, base, differential, differential, state
+
+        if resources.model_id in {
+            "resnet8-mnist", "mobilenetv2-cifar10", "vgg11-bn-cifar10",
+            "squeezenet1_1-cifar10",
+        }:
+            from vision_zoo.data import create_loaders
+            from vision_zoo.engine import calibrate_input_scales, differential_copy
+            from vision_zoo.models import create_model
+
+            loaders = create_loaders(
+                resources.model_id, resources.dataset_root,
+                batch_size=train_batch_size, eval_batch_size=eval_batch_size,
+                seed=request.seed, num_workers=0, download=False,
+            )
+
+            def base():
+                model = create_model(resources.model_id)
+                model.load_state_dict(state)
+                return model
+
+            if resources.auxiliary is not None:
+                scales = json.loads(resources.auxiliary.read_text(encoding="utf-8"))
+                if not isinstance(scales, dict) or not scales:
+                    raise ValueError(
+                        f"{resources.model_id} input scales must be a non-empty object: "
+                        f"{resources.auxiliary}"
+                    )
+                scales = {str(key): float(value) for key, value in scales.items()}
+            else:
+                scales = calibrate_input_scales(
+                    base(), loaders[0], device=str(resources.device), max_batches=1,
+                )
+
+            def differential(model, lut, ste):
+                return differential_copy(model, lut, scales, ste=ste)
+
+            return loaders, base, differential, differential, state
 
         if resources.model_id == "tinytransformer-cifar10":
             from tiny_transformer import cct_7_3x1_32 as model_factory
             from tiny_transformer.data import create_cifar10_loaders
-            from tiny_transformer.engine import differential_head_copy as differential_copy
+            from tiny_transformer.engine import differential_copy as full_differential_copy
+            from tiny_transformer.engine import differential_head_copy
         else:
             from resnet20.data import create_cifar10_loaders
             from resnet20.engine import differential_copy
@@ -350,13 +423,23 @@ class ErrorAwareTrainingService:
                 _configure_tinytransformer_head_finetuning(model)
             return model
 
-        def differential(model, lut, ste):
-            converted = differential_copy(model, lut, scales, ste=ste)
-            if resources.model_id == "tinytransformer-cifar10":
+        if resources.model_id == "tinytransformer-cifar10":
+            def training_differential(model, lut, ste):
+                converted = differential_head_copy(model, lut, scales, ste=ste)
                 _configure_tinytransformer_head_finetuning(converted)
-            return converted
+                return converted
 
-        return loaders, base, differential, state
+            def evaluation_differential(model, lut, ste):
+                # Match single-sample and grouped inference: every Conv2d/Linear
+                # executes the selected signed-differential LUT during evaluation.
+                return full_differential_copy(model, lut, scales, ste=ste)
+        else:
+            def training_differential(model, lut, ste):
+                return differential_copy(model, lut, scales, ste=ste)
+
+            evaluation_differential = training_differential
+
+        return loaders, base, training_differential, evaluation_differential, state
 
     def run(
         self, request: TrainingRequest, *, progress: ProgressCallback | None = None,
@@ -370,7 +453,9 @@ class ErrorAwareTrainingService:
         started = perf_counter()
         output = Path(request.output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
-        loaders, base, differential, initial_state = self._prepare(resources, request)
+        (
+            loaders, base, training_differential, evaluation_differential, initial_state,
+        ) = self._prepare(resources, request)
         train_loader, validation_loader, test_loader = loaders
         error_model = HardwareErrorModel.load(resources.error_model)
         ideal_lut = error_model.effective_lut(0.0)
@@ -391,16 +476,18 @@ class ErrorAwareTrainingService:
         before = {
             "float": evaluate_with_progress(base(), test_loader, "float", "baseline float", 1, 3),
             "ideal_differential": evaluate_with_progress(
-                differential(base(), ideal_lut, False), test_loader, "ideal_differential",
+                evaluation_differential(base(), ideal_lut, False), test_loader,
+                "ideal_differential",
                 "baseline ideal differential", 3, 6,
             ),
             "device_differential": evaluate_with_progress(
-                differential(base(), device_lut, False), test_loader, "device_differential",
+                evaluation_differential(base(), device_lut, False), test_loader,
+                "device_differential",
                 "baseline device differential", 6, 9,
             ),
         }
 
-        model = differential(base(), device_lut, True).to(resources.device)
+        model = training_differential(base(), device_lut, True).to(resources.device)
         training_initial_state = deepcopy(model.state_dict())
         trainable_names = {
             name for name, parameter in model.named_parameters() if parameter.requires_grad
@@ -478,7 +565,7 @@ class ErrorAwareTrainingService:
             trained_model = base()
             trained_model.load_state_dict(best_state, strict=False)
             if lut is not None:
-                trained_model = differential(trained_model, lut, False)
+                trained_model = evaluation_differential(trained_model, lut, False)
                 trained_model.load_state_dict(best_state, strict=False)
             return trained_model
 
@@ -552,7 +639,8 @@ class ErrorAwareTrainingService:
             },
             "training_strategy": {
                 "scope": (
-                    "frozen_float_backbone_with_differential_sequence_pooling_and_classifier_heads"
+                    "differential_sequence_pooling_and_classifier_head_training; "
+                    "full_network_differential_evaluation"
                     if resources.model_id == "tinytransformer-cifar10" else "full_network"
                 ),
                 "trainable_parameter_names": sorted(trainable_names),

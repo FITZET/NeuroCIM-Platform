@@ -50,6 +50,27 @@ def test_checkpoint_round_trip_includes_training_state(tmp_path: Path) -> None:
     assert len(digest) == 64 and path.with_suffix(".pt.sha256").is_file()
 
 
+def test_checkpoint_loader_prefers_best_error_aware_state(tmp_path: Path) -> None:
+    model = BinaryMNIST()
+    final = model.state_dict()
+    best = {name: value.clone() for name, value in final.items()}
+    marker = next(name for name, value in best.items() if torch.is_floating_point(value))
+    best[marker].fill_(0.375)
+    payload = {
+        "model_state_dict": final,
+        "best_model_state_dict": best,
+        "rng_state": capture_rng_state(),
+    }
+    path = tmp_path / "eat_checkpoint.pt"
+    torch.save(payload, path)
+
+    restored = BinaryMNIST()
+    loaded = load_checkpoint(path, restored)
+
+    assert loaded is not payload
+    torch.testing.assert_close(restored.state_dict()[marker], best[marker])
+
+
 def test_resume_restores_all_rngs_and_continuous_training_state(tmp_path: Path) -> None:
     seed_everything(19)
     model = nn.Linear(3, 2); optimizer = torch.optim.Adam(model.parameters(), lr=.01)

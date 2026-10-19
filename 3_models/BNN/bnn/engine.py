@@ -88,7 +88,11 @@ def save_checkpoint(path: Path, payload: dict[str, Any]) -> str:
 def load_checkpoint(path: Path, model: nn.Module, optimizer=None, scheduler=None, device="cpu",
                     train_loader_generator: torch.Generator | None = None) -> dict:
     payload = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(payload["model_state_dict"])
+    # Error-aware training checkpoints retain both the last epoch and the
+    # validation-selected best weights. Inference and resumed model state must
+    # use the same best-weight convention as the other supported networks.
+    state = payload.get("best_model_state_dict", payload["model_state_dict"])
+    model.load_state_dict(state)
     if optimizer is not None: optimizer.load_state_dict(payload["optimizer_state_dict"])
     if scheduler is not None: scheduler.load_state_dict(payload["scheduler_state_dict"])
     restore_rng_state(payload["rng_state"])

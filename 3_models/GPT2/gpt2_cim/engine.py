@@ -21,6 +21,16 @@ DIFFERENTIAL_LAYERS = (
 )
 
 
+def differential_layers_for(variant: str) -> tuple[str, ...]:
+    block = {"gpt2-small": 11, "gpt2-large": 35}.get(variant)
+    if block is None:
+        raise ValueError(f"Unsupported GPT-2 variant: {variant}")
+    return (
+        f"transformer.h.{block}.attn.c_proj",
+        f"transformer.h.{block}.mlp.c_proj",
+    )
+
+
 def load_native_checkpoint(model: nn.Module, checkpoint: str | Path) -> dict[str, torch.Tensor]:
     payload = torch.load(Path(checkpoint), map_location="cpu", weights_only=False)
     state = payload.get("best_model_state_dict", payload.get("model_state_dict", payload))
@@ -30,11 +40,12 @@ def load_native_checkpoint(model: nn.Module, checkpoint: str | Path) -> dict[str
 
 def calibrate_input_scales(
     model: nn.Module, token_batches: list[torch.Tensor], *, device: str,
+    layer_names: tuple[str, ...] = DIFFERENTIAL_LAYERS,
 ) -> dict[str, float]:
     maxima: dict[str, float] = {}
     modules = dict(model.named_modules())
     handles = []
-    for name in DIFFERENTIAL_LAYERS:
+    for name in layer_names:
         layer = modules.get(name)
         if not isinstance(layer, nn.Linear):
             raise RuntimeError(f"GPT-2 calibration layer is missing: {name}")
@@ -52,16 +63,17 @@ def calibrate_input_scales(
             handle.remove()
         model.cpu()
     epsilon = np.finfo(np.float32).eps
-    return {name: max(maxima[name], epsilon) / 255.0 for name in DIFFERENTIAL_LAYERS}
+    return {name: max(maxima[name], epsilon) / 255.0 for name in layer_names}
 
 
 def configure_differential_heads(
     model: nn.Module, lut: np.ndarray | torch.Tensor,
     input_scales: dict[str, float], *, ste: bool = False,
+    layer_names: tuple[str, ...] = DIFFERENTIAL_LAYERS,
 ) -> nn.Module:
     """Map the final attention/MLP output projections to signed CIM arithmetic."""
     table = torch.as_tensor(lut)
-    for full_name in DIFFERENTIAL_LAYERS:
+    for full_name in layer_names:
         parent_name, _, child_name = full_name.rpartition(".")
         parent = model.get_submodule(parent_name)
         source = getattr(parent, child_name)

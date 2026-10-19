@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "model_id": "lenet5-mnist",
+      "checkpoint": "3_models/LeNet_5/chekpoint/lenet5_float.pt",
+      "auxiliary": [
+        "3_models/LeNet_5/chekpoint/quantization.json"
+      ],
+      "sha256": "48c47fbbdeb4d8e4b71762d421d78d4e45496a5fbc97d6dbe4410900ace37825",
+      "dataset": "data/mnist",
+      "source": "https://github.com/FITZET/NeuroCIM-Platform",
+      "version": "project-lenet5-v1"
+    },
+    {
+      "model_id": "bnn-mnist",
+      "checkpoint": "3_models/BNN/checkpoint/bnn_mnist.pt",
+      "auxiliary": [],
+      "sha256": "c7b9f3447864c8848ada6d46b65d129e90ac48440462530bb5d3a148636e695c",
+      "dataset": "data/mnist",
+      "source": "https://github.com/FITZET/NeuroCIM-Platform",
+      "version": "binary-mnist-v1"
+    },
+    {
+      "model_id": "resnet20-cifar10",
+      "checkpoint": "3_models/Resnet20/checkpoint/resnet20_cifar10.pt",
+      "auxiliary": [
+        "3_models/Resnet20/output/formal/input_scales.json"
+      ],
+      "sha256": "e6d5b6d6a49dfee5e6dd36de508a6fbbb89fe75aa1ca77803cc55ffd15fd816e",
+      "dataset": "data/cifar10",
+      "source": "https://github.com/FITZET/NeuroCIM-Platform",
+      "version": "canonical-cifar-resnet20-v1"
+    },
+    {
+      "model_id": "tinytransformer-cifar10",
+      "checkpoint": "3_models/TinyTransformer/checkpoint/cct_7_3x1_32_cifar10.pth",
+      "auxiliary": [
+        "3_models/TinyTransformer/checkpoint/input_scales.json"
+      ],
+      "sha256": "8abfcd3d98674cd5b6fe07361f37001f7d2ebe57f513e5cc724ccdc8790204fe",
+      "dataset": "data/cifar10",
+      "source": "https://github.com/SHI-Labs/Compact-Transformers",
+      "version": "cct_7_3x1_32"
+    },
+    {
+      "model_id": "gpt2-small",
+      "checkpoint": "3_models/GPT2/checkpoint/gpt2_nanogpt.pt",
+      "auxiliary": [
+        "3_models/GPT2/checkpoint/input_scales.json",
+        "3_models/GPT2/checkpoint/tokenizer"
+      ],
+      "sha256": "095c16e3c0dcd897b40046139828e77aed24bb64985e4358357e529616c5e534",
+      "dataset": null,
+      "source": "https://github.com/karpathy/nanoGPT",
+      "version": "gpt2-124M"
+    },
+    {
+      "model_id": "gpt2-large",
+      "checkpoint": "3_models/GPT2/checkpoint/gpt2-large/model.safetensors",
+      "auxiliary": [
+        "3_models/GPT2/checkpoint/gpt2-large/config.json",
+        "3_models/GPT2/checkpoint/gpt2-large/merges.txt",
+        "3_models/GPT2/checkpoint/gpt2-large/tokenizer_config.json",
+        "3_models/GPT2/checkpoint/gpt2-large/vocab.json",
+        "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1/wiki.train.raw",
+        "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1/wiki.valid.raw",
+        "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1/wiki.test.raw"
+      ],
+      "sha256": "5f47f3e12f91cd33b662ce7e433b6150ad5512b5884a2cee961b50e9c3bbebce",
+      "dataset": "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1",
+      "source": "https://github.com/openai/gpt-2",
+      "version": "HF-32b71b12589c2f8d625668d2335a01cac3249519"
+    },
+    {
+      "model_id": "resnet8-mnist",
+      "checkpoint": "3_models/VisionZoo/checkpoint/resnet8_mnist.pt",
+      "auxiliary": [
+        "3_models/VisionZoo/checkpoint/resnet8-mnist_input_scales.json"
+      ],
+      "sha256": "b5130a0b3234d947dd0cbabb90f11631c1e25f23289c55cbc4a41b7ee0a986ed",
+      "dataset": "data/mnist",
+      "source": "https://github.com/FITZET/NeuroCIM-Platform",
+      "version": "project-resnet8-mnist-v1"
+    },
+    {
+      "model_id": "mobilenetv2-cifar10",
+      "checkpoint": "3_models/VisionZoo/checkpoint/cifar10_mobilenetv2_x1_0-fe6a5b48.pt",
+      "auxiliary": [
+        "3_models/VisionZoo/checkpoint/mobilenetv2-cifar10_input_scales.json"
+      ],
+      "sha256": "fe6a5b4808c9b1b7a440c02fa19a10dc3d8ea5c63e38381b2f60b1937958735e",
+      "dataset": "data/cifar10",
+      "source": "https://github.com/chenyaofo/pytorch-cifar-models",
+      "version": "786c16252c0fc58ee9adac063f8337cc4a7a497a"
+    },
+    {
+      "model_id": "vgg11-bn-cifar10",
+      "checkpoint": "3_models/VisionZoo/checkpoint/cifar10_vgg11_bn-eaeebf42.pt",
+      "auxiliary": [
+        "3_models/VisionZoo/checkpoint/vgg11-bn-cifar10_input_scales.json"
+      ],
+      "sha256": "eaeebf42370c92fdfbb5dbe8eba7c27d4eb7366a1dca0b5be435364ccdf54378",
+      "dataset": "data/cifar10",
+      "source": "https://github.com/chenyaofo/pytorch-cifar-models",
+      "version": "786c16252c0fc58ee9adac063f8337cc4a7a497a"
+    },
+    {
+      "model_id": "squeezenet1_1-cifar10",
+      "checkpoint": "3_models/VisionZoo/checkpoint/squeezenet1_1_cifar10.pt",
+      "auxiliary": [
+        "3_models/VisionZoo/checkpoint/squeezenet1_1-cifar10_input_scales.json"
+      ],
+      "sha256": "df967fd502b9d8fe2e7dea77d8363ad7fe14df04efcc173df1f94fc05f7cfe4c",
+      "dataset": "data/cifar10",
+      "source": "https://github.com/pytorch/vision",
+      "version": "v0.19.0-squeezenet1_1"
+    }
+  ]
+}

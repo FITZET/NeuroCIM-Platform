@@ -131,3 +131,39 @@ def test_bnn_mnist_grouped_inference_without_auxiliary_file(tmp_path: Path, monk
     assert outcome.model_id == "bnn-mnist"
     assert outcome.dataset == "MNIST/test"
     assert outcome.modes["device_differential"].accuracy == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("model_id,dataset_name", [
+    ("resnet8-mnist", "MNIST/test"),
+    ("mobilenetv2-cifar10", "CIFAR-10/test"),
+    ("vgg11-bn-cifar10", "CIFAR-10/test"),
+    ("squeezenet1_1-cifar10", "CIFAR-10/test"),
+])
+def test_vision_zoo_grouped_inference_uses_static_input_scales(
+    tmp_path: Path, monkeypatch, model_id: str, dataset_name: str,
+) -> None:
+    from neurocim_opt import inference_runtime
+
+    request = _request(tmp_path, model_id=model_id)
+    required = (
+        inference_runtime.cifar10_required_files(request.dataset_root)
+        if model_id.endswith("cifar10") else
+        inference_runtime.mnist_required_files(request.dataset_root, include_training=False)
+    )
+    for path in required:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+    _fake_resources(monkeypatch)
+    captured = {}
+    original = inference_runtime.get_registered_inference_resources
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(inference_runtime, "get_registered_inference_resources", capture)
+    outcome = run_grouped_batch_inference(request)
+    assert outcome.model_id == model_id and outcome.dataset == dataset_name
+    assert captured["model_root"].name == "VisionZoo"
+    assert captured["auxiliary_path"] == request.quantization_path.resolve()
+    assert outcome.resources["input_scales"] == str(request.quantization_path.resolve())
