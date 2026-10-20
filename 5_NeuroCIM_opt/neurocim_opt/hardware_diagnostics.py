@@ -44,6 +44,38 @@ class HardwareDiagnostics:
         return asdict(self)
 
 
+def run_cuda_computation_smoke() -> dict[str, Any]:
+    """Execute real CUDA kernels from the current (including frozen) runtime."""
+    import torch
+
+    report = collect_hardware_diagnostics(torch_module=torch)
+    result: dict[str, Any] = report.as_dict()
+    result["real_cuda_smoke"] = "failed"
+    if not report.runtime_ready:
+        result["smoke_error"] = "; ".join(report.reasons) or "CUDA runtime is not ready"
+        return result
+    try:
+        left = torch.tensor([[1.0, 2.0]], device="cuda")
+        right = torch.tensor([[3.0], [4.0]], device="cuda")
+        value = float((left @ right).item())
+        layer = torch.nn.Conv2d(1, 2, kernel_size=3, padding=1).eval().cuda()
+        with torch.inference_mode():
+            output = layer(torch.ones(1, 1, 8, 8, device="cuda"))
+        torch.cuda.synchronize()
+        if value != 11.0 or output.shape != (1, 2, 8, 8):
+            raise RuntimeError(
+                f"unexpected CUDA result: matmul={value}, conv_shape={tuple(output.shape)}"
+            )
+        if not bool(torch.isfinite(output).all()):
+            raise RuntimeError("CUDA convolution produced non-finite output")
+        result["real_cuda_smoke"] = "passed"
+        result["cuda_matmul_result"] = value
+        result["cuda_conv_shape"] = list(output.shape)
+    except Exception as exc:
+        result["smoke_error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 

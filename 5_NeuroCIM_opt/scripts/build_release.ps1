@@ -136,6 +136,28 @@ $smokeImage = Join-Path $releaseRoot "release_smoke.png"
 python (Join-Path $platform "scripts\verify_frozen_app.py") (Join-Path $appTarget "NeuroCIM.exe") $smokeImage
 if ($LASTEXITCODE -ne 0) { throw "Frozen application smoke test failed" }
 
+$gpuDiagnosticsLauncher = @'
+@echo off
+setlocal
+set "OUTPUT=%~dp0gpu_diagnostics.json"
+"%~dp0NeuroCIM\NeuroCIM.exe" --gpu-smoke "%OUTPUT%"
+set "RESULT=%ERRORLEVEL%"
+echo.
+if "%RESULT%"=="0" (
+  echo GPU check passed. Details: "%OUTPUT%"
+) else (
+  echo GPU check failed. NeuroCIM can still run with device set to auto or cpu.
+  echo Details: "%OUTPUT%"
+)
+pause
+exit /b %RESULT%
+'@
+[System.IO.File]::WriteAllText(
+    (Join-Path $portable "GPU-Diagnostics.bat"),
+    $gpuDiagnosticsLauncher,
+    [System.Text.Encoding]::ASCII
+)
+
 $manifestFiles = Get-ChildItem -LiteralPath $portable -Recurse -File
 $manifest = [ordered]@{
     format_version = 1
