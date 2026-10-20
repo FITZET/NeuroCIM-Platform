@@ -1,4 +1,4 @@
-name: Build private Windows release
+name: Build direct Windows release
 
 on:
   push:
@@ -13,39 +13,25 @@ permissions:
   contents: read
 
 jobs:
-  bootstrapper:
-    runs-on: windows-latest
+  initialize-release:
+    runs-on: ubuntu-latest
     env:
-      NEUROCIM_GITHUB_CLIENT_ID: ${{ secrets.NEUROCIM_GITHUB_CLIENT_ID }}
+      GH_TOKEN: ${{ secrets.DISTRIBUTION_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - name: Build public installer bootstrapper
-        shell: pwsh
+      - name: Create private release target
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r 5_NeuroCIM_opt/packaging/requirements-build.txt "keyring>=24,<26"
-          Set-Location 5_NeuroCIM_opt
-          .\scripts\build_bootstrapper.ps1 -ClientId $env:NEUROCIM_GITHUB_CLIENT_ID
-      - name: Smoke-test frozen bootstrapper
-        shell: pwsh
-        run: |
-          $env:NEUROCIM_BOOTSTRAPPER_SMOKE = Join-Path $env:RUNNER_TEMP "bootstrapper-smoke.txt"
-          $process = Start-Process -FilePath "5_NeuroCIM_opt\release\bootstrapper\NeuroCIM-Installer.exe" `
-            -ArgumentList "--release-smoke" -WindowStyle Hidden -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "Bootstrapper smoke test failed: $($process.ExitCode)" }
-          $result = Get-Content -LiteralPath $env:NEUROCIM_BOOTSTRAPPER_SMOKE -Raw
-          if (-not $result.StartsWith("ok:")) { throw "Bootstrapper smoke result is invalid" }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: neurocim-bootstrapper
-          path: 5_NeuroCIM_opt/release/bootstrapper/NeuroCIM-Installer.exe
-          retention-days: 7
+          if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then version='${{ inputs.version }}'; else version='${{ github.ref_name }}'; version="${version#v}"; fi
+          tag="v${version}"
+          notes='Windows 11 CPU and NVIDIA GPU offline installers. Download the EXE and all matching BIN parts into one folder. The GPU build uses CUDA 11.8 and falls back to CPU when CUDA is unavailable.'
+          if gh release view "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution >/dev/null 2>&1; then
+            gh release edit "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution --title "NeuroCIM ${version}" --notes "$notes"
+          else
+            gh release create "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution --title "NeuroCIM ${version}" --notes "$notes"
+          fi
 
   build:
+    needs: initialize-release
     strategy:
       fail-fast: false
       matrix:
@@ -98,75 +84,31 @@ jobs:
         shell: pwsh
         working-directory: 5_NeuroCIM_opt
         run: .\scripts\build_installer.ps1 -Flavor ${{ matrix.flavor }} -Version $env:NEUROCIM_VERSION -ClientId $env:NEUROCIM_GITHUB_CLIENT_ID
-      - uses: actions/upload-artifact@v4
-        with:
-          name: neurocim-${{ matrix.flavor }}
-          path: 5_NeuroCIM_opt/release/artifacts/${{ matrix.slug }}/*
-          retention-days: 7
+      - name: Upload ${{ matrix.flavor }} installer directly to release
+        shell: pwsh
+        run: |
+          $root = Resolve-Path '5_NeuroCIM_opt/release/artifacts/${{ matrix.slug }}'
+          $sourceManifest = Join-Path $root 'update-manifest.json'
+          $flavorManifest = Join-Path $root 'update-manifest-${{ matrix.slug }}.json'
+          Move-Item -LiteralPath $sourceManifest -Destination $flavorManifest -Force
+          $files = Get-ChildItem -LiteralPath $root -File | Select-Object -ExpandProperty FullName
+          gh release upload "v$env:NEUROCIM_VERSION" --repo Lowpower-Lab/NeuroCIM-Distribution --clobber $files
 
-  publish:
+  finalize-release:
     needs: build
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.DISTRIBUTION_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Resolve version
+      - name: Merge update manifests without Actions artifacts
         shell: bash
         run: |
           if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then version='${{ inputs.version }}'; else version='${{ github.ref_name }}'; version="${version#v}"; fi
-          echo "NEUROCIM_VERSION=$version" >> "$GITHUB_ENV"
-      - name: Merge update manifests
-        run: |
-          python 5_NeuroCIM_opt/scripts/merge_update_manifests.py \
-            --output artifacts/update-manifest.json \
-            artifacts/neurocim-CPU/update-manifest.json \
-            artifacts/neurocim-GPU/update-manifest.json
-          rm artifacts/neurocim-CPU/update-manifest.json artifacts/neurocim-GPU/update-manifest.json
-      - name: Publish private release
-        shell: bash
-        run: |
-          tag="v${NEUROCIM_VERSION}"
-          if gh release view "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution >/dev/null 2>&1; then
-            gh release upload "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution --clobber \
-              artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*
-            gh release edit "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution \
-              --title "NeuroCIM ${NEUROCIM_VERSION}" \
-              --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts."
-          else
-            gh release create "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution \
-              --title "NeuroCIM ${NEUROCIM_VERSION}" \
-              --notes "Windows 11 CPU and NVIDIA GPU installers. Access is restricted to approved GitHub accounts." \
-              artifacts/update-manifest.json artifacts/neurocim-CPU/* artifacts/neurocim-GPU/*
-          fi
-
-  publish-bootstrapper:
-    needs: bootstrapper
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.ACCESS_RELEASE_TOKEN }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: neurocim-bootstrapper
-          path: bootstrapper
-      - name: Resolve version
-        shell: bash
-        run: |
-          if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then version='${{ inputs.version }}'; else version='${{ github.ref_name }}'; version="${version#v}"; fi
-          echo "NEUROCIM_VERSION=$version" >> "$GITHUB_ENV"
-      - name: Publish public bootstrapper
-        shell: bash
-        run: |
-          tag="v${NEUROCIM_VERSION}"
-          if gh release view "$tag" --repo FITZET/NeuroCIM-Access >/dev/null 2>&1; then
-            gh release upload "$tag" --repo FITZET/NeuroCIM-Access --clobber bootstrapper/NeuroCIM-Installer.exe
-          else
-            gh release create "$tag" --repo FITZET/NeuroCIM-Access \
-              --title "NeuroCIM 安装引导程序 ${NEUROCIM_VERSION}" \
-              --notes "登录已获准的 GitHub 账号后，自动检测硬件并安装 CPU 或 NVIDIA GPU 版本。" \
-              bootstrapper/NeuroCIM-Installer.exe
-          fi
+          tag="v${version}"
+          mkdir manifests
+          gh release download "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution --pattern 'update-manifest-*.json' --dir manifests
+          python 5_NeuroCIM_opt/scripts/merge_update_manifests.py --output manifests/update-manifest.json manifests/update-manifest-cpu.json manifests/update-manifest-gpu.json
+          gh release upload "$tag" --repo Lowpower-Lab/NeuroCIM-Distribution --clobber manifests/update-manifest.json
+          gh release delete-asset "$tag" update-manifest-cpu.json --repo Lowpower-Lab/NeuroCIM-Distribution -y
+          gh release delete-asset "$tag" update-manifest-gpu.json --repo Lowpower-Lab/NeuroCIM-Distribution -y
