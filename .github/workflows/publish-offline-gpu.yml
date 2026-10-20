@@ -1,0 +1,43 @@
+name: Publish public offline GPU installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified GPU installer from private distribution
+        env:
+          GH_TOKEN: ${{ secrets.DISTRIBUTION_TOKEN }}
+        run: |
+          mkdir -p gpu-installer
+          gh release download "v${{ inputs.version }}" \
+            --repo Lowpower-Lab/NeuroCIM-Distribution \
+            --pattern "NeuroCIM-Setup-GPU-${{ inputs.version }}*" \
+            --dir gpu-installer
+          test -f "gpu-installer/NeuroCIM-Setup-GPU-${{ inputs.version }}.exe"
+          test "$(find gpu-installer -maxdepth 1 -name '*.bin' | wc -l)" -gt 0
+
+      - name: Publish direct-download offline installer
+        env:
+          GH_TOKEN: ${{ secrets.ACCESS_RELEASE_TOKEN }}
+        run: |
+          tag="v${{ inputs.version }}"
+          notes='Direct offline NVIDIA GPU installer. Download the EXE and every BIN part into one folder, then run the EXE. No NeuroCIM account application or installer login is required. CUDA 11.8 build; NVIDIA Windows driver 452.39 or newer is required. The application falls back to CPU when CUDA is unavailable.'
+          if gh release view "$tag" --repo FITZET/NeuroCIM-Access >/dev/null 2>&1; then
+            gh release upload "$tag" --repo FITZET/NeuroCIM-Access --clobber gpu-installer/*
+            gh release edit "$tag" --repo FITZET/NeuroCIM-Access \
+              --title "NeuroCIM ${{ inputs.version }} Offline GPU Installer" --notes "$notes"
+          else
+            gh release create "$tag" --repo FITZET/NeuroCIM-Access \
+              --title "NeuroCIM ${{ inputs.version }} Offline GPU Installer" \
+              --notes "$notes" gpu-installer/*
+          fi
