@@ -264,7 +264,10 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
                 gpt2_root / "checkpoint/input_scales.json",
                 gpt2_root / "checkpoint/tokenizer",
             ),
-            capabilities=("single_inference", "batch_inference", "text_generation"),
+            capabilities=(
+                "single_inference", "batch_inference", "text_generation",
+                "error_aware_training",
+            ),
             source_url="https://github.com/karpathy/nanoGPT",
             source_version="gpt2-124M",
             weight_sha256="095c16e3c0dcd897b40046139828e77aed24bb64985e4358357e529616c5e534",

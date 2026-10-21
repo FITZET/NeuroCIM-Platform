@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
+import math
 import sys
 from time import perf_counter
 from typing import Callable
@@ -38,6 +39,8 @@ class TrainingRequest:
     # Explicit smoke-run limits. None always means a complete dataset pass.
     max_train_batches: int | None = None
     max_eval_batches: int | None = None
+    sequence_length: int = 64
+    gradient_accumulation_steps: int = 1
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,7 @@ _MODEL_ALIASES = {
     "vgg11-bn-cifar10": "vgg11-bn-cifar10",
     "squeezenet": "squeezenet1_1-cifar10", "squeezenet1.1": "squeezenet1_1-cifar10",
     "squeezenet1_1-cifar10": "squeezenet1_1-cifar10",
+    "gpt2-small": "gpt2-small", "gpt-2-small": "gpt2-small",
 }
 
 
@@ -105,7 +109,7 @@ def canonical_model_id(value: str) -> str:
         return _MODEL_ALIASES[value.strip().lower()]
     except KeyError as exc:
         raise ValueError(
-            f"Unsupported training model {value!r}; choose a registered image classifier"
+            f"Unsupported training model {value!r}; choose a registered trainable model"
         ) from exc
 
 
@@ -133,6 +137,15 @@ def _state_digest(state: dict[str, torch.Tensor]) -> str:
 
 
 def _dataset_present(dataset: Path, name: str) -> bool:
+    if name == "wikitext2":
+        return dataset.is_dir() and all(
+            any((dataset / filename).is_file() for filename in candidates)
+            for candidates in (
+                ("wiki.train.raw", "train.txt"),
+                ("wiki.valid.raw", "validation.txt", "valid.txt"),
+                ("wiki.test.raw", "test.txt"),
+            )
+        )
     if name == "mnist":
         raw = dataset / "MNIST" / "raw"
         return raw.is_dir() and any(raw.glob("*-images-idx*-ubyte*"))
@@ -193,6 +206,10 @@ class ErrorAwareTrainingService:
             raise ValueError("max_train_batches must be at least 1")
         if request.max_eval_batches is not None and request.max_eval_batches < 1:
             raise ValueError("max_eval_batches must be at least 1")
+        if not 2 <= request.sequence_length <= 1024:
+            raise ValueError("sequence_length must be in [2, 1024]")
+        if request.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be at least 1")
         if request.device not in {"auto", "cpu", "cuda"}:
             raise ValueError("device must be auto, cpu, or cuda")
         if request.device == "cuda" and not torch.cuda.is_available():
@@ -237,6 +254,11 @@ class ErrorAwareTrainingService:
                 root / "3_models/VisionZoo/checkpoint/squeezenet1_1_cifar10.pt",
                 root / "3_models/VisionZoo/checkpoint/squeezenet1_1-cifar10_input_scales.json",
             ),
+            "gpt2-small": (
+                "wikitext2", root / "3_models/GPT2",
+                root / "3_models/GPT2/checkpoint/gpt2_nanogpt.pt",
+                root / "3_models/GPT2/checkpoint/input_scales.json",
+            ),
         }
         dataset_name, model_root, default_checkpoint, default_auxiliary = defaults[model_id]
         checkpoint = Path(request.checkpoint_path or default_checkpoint).expanduser().resolve()
@@ -253,12 +275,24 @@ class ErrorAwareTrainingService:
             raise FileNotFoundError(
                 f"Required training resources are missing for {model_id}:\n" + "\n".join(missing)
             )
-        dataset = _normalise_dataset_root(
-            Path(request.dataset_root) if request.dataset_root else data_root(dataset_name),
-            dataset_name,
-        )
+        if model_id == "gpt2-small":
+            bundled_wikitext = root / "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1"
+            requested_dataset = Path(request.dataset_root) if request.dataset_root else bundled_wikitext
+            # GPT text generation historically recorded its tokenizer directory as
+            # dataset_root. Convert that inherited value to the bundled training corpus.
+            if requested_dataset.name == "tokenizer":
+                requested_dataset = bundled_wikitext
+            dataset = requested_dataset.expanduser().resolve()
+        else:
+            dataset = _normalise_dataset_root(
+                Path(request.dataset_root) if request.dataset_root else data_root(dataset_name),
+                dataset_name,
+            )
         if not _dataset_present(dataset, dataset_name):
-            expected = dataset / ("MNIST/raw" if dataset_name == "mnist" else "cifar-10-batches-py/test_batch")
+            expected = (
+                dataset / "wiki.train.raw" if dataset_name == "wikitext2" else
+                dataset / ("MNIST/raw" if dataset_name == "mnist" else "cifar-10-batches-py/test_batch")
+            )
             raise FileNotFoundError(
                 f"{dataset_name.upper()} is unavailable under {dataset}; expected {expected}"
             )
@@ -448,6 +482,8 @@ class ErrorAwareTrainingService:
         notify = progress or (lambda _percent, _message, _metrics=None: None)
         resources = self.validate(request)
         self._cancelled(cancel)
+        if resources.model_id == "gpt2-small":
+            return self._run_gpt2_small(request, resources, notify, cancel)
         from .error_model import HardwareErrorModel
 
         started = perf_counter()
@@ -508,7 +544,7 @@ class ErrorAwareTrainingService:
         total_batches = per_epoch * request.epochs
         completed_batches = 0
         for epoch in range(request.epochs):
-            model.train()
+            model.train().to(resources.device)
             total_loss = 0.0
             correct = samples = 0
             for batch_index, (inputs, targets) in enumerate(train_loader):
@@ -659,6 +695,337 @@ class ErrorAwareTrainingService:
             str(checkpoint_path), str(history_path), str(result_path), str(output),
             str(resources.device), payload["elapsed_seconds"], tuple(history),
             payload["evaluations"], weight_update,
+        )
+
+    def _run_gpt2_small(
+        self, request: TrainingRequest, resources: TrainingResources,
+        notify: ProgressCallback, cancel: CancelCallback | None,
+    ) -> TrainingOutcome:
+        """Fine-tune GPT-2 Small's two deployed LUT projection layers on WikiText-2."""
+        from torch.utils.data import DataLoader, Dataset
+
+        from .error_model import HardwareErrorModel
+        from .gpt2_evaluation import load_wikitext2_raw
+        from .gpt2_resources import load_checkpoint_into_model
+
+        self._add_import_root(resources.model_root)
+        from gpt2_cim import gpt2_for_variant
+        from gpt2_cim.engine import configure_differential_heads, differential_layers_for
+        from transformers import GPT2Tokenizer
+
+        class CausalWindows(Dataset):
+            def __init__(self, token_ids: list[int], length: int):
+                self.tokens = torch.tensor(token_ids, dtype=torch.long)
+                self.length = length
+                self.windows = max(0, (self.tokens.numel() - 1) // length)
+
+            def __len__(self) -> int:
+                return self.windows
+
+            def __getitem__(self, index: int):
+                begin = index * self.length
+                window = self.tokens[begin:begin + self.length + 1]
+                return window[:-1], window[1:]
+
+        started = perf_counter()
+        output = Path(request.output_dir).expanduser().resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        tokenizer_root = resources.model_root / "checkpoint/tokenizer"
+        if not tokenizer_root.is_dir():
+            raise FileNotFoundError(f"GPT-2 tokenizer directory is missing: {tokenizer_root}")
+        tokenizer = GPT2Tokenizer.from_pretrained(str(tokenizer_root))
+        # The corpus is intentionally tokenized once and split into short model
+        # windows afterwards; suppress the tokenizer's single-sequence warning.
+        tokenizer.model_max_length = 2**31 - 1
+        split_tokens: dict[str, list[int]] = {}
+        for split in ("train", "validation", "test"):
+            self._cancelled(cancel)
+            _path, text = load_wikitext2_raw(resources.dataset_root, split)
+            split_tokens[split] = tokenizer.encode(text)
+            if len(split_tokens[split]) <= request.sequence_length:
+                raise ValueError(
+                    f"WikiText-2 {split} split has too few tokens for sequence_length="
+                    f"{request.sequence_length}"
+                )
+        generator = torch.Generator().manual_seed(request.seed)
+        train_loader = DataLoader(
+            CausalWindows(split_tokens["train"], request.sequence_length),
+            batch_size=min(request.batch_size, 2), shuffle=True, generator=generator,
+            num_workers=0,
+        )
+        validation_loader = DataLoader(
+            CausalWindows(split_tokens["validation"], request.sequence_length),
+            batch_size=1, shuffle=False, num_workers=0,
+        )
+        test_loader = DataLoader(
+            CausalWindows(split_tokens["test"], request.sequence_length),
+            batch_size=1, shuffle=False, num_workers=0,
+        )
+        layer_names = differential_layers_for("gpt2-small")
+        scales = json.loads(resources.auxiliary.read_text(encoding="utf-8"))
+        if any(name not in scales for name in layer_names):
+            raise ValueError(f"GPT-2 input scales are missing deployed layers: {layer_names}")
+        error_model = HardwareErrorModel.load(resources.error_model)
+        ideal_lut = error_model.effective_lut(0.0)
+        device_lut = error_model.effective_lut(request.error_strength)
+
+        def base_model():
+            model = gpt2_for_variant("gpt2-small")
+            load_checkpoint_into_model(model, resources.checkpoint)
+            return model
+
+        def apply_trainable_state(model: nn.Module, state: dict[str, torch.Tensor] | None) -> None:
+            if not state:
+                return
+            parameters = dict(model.named_parameters())
+            with torch.no_grad():
+                for name, value in state.items():
+                    parameters[name].copy_(value.to(parameters[name].device, parameters[name].dtype))
+
+        def differential_model(lut, *, ste: bool, trained=None):
+            model = base_model()
+            apply_trainable_state(model, trained)
+            configure_differential_heads(
+                model, lut, scales, ste=ste, layer_names=layer_names,
+            )
+            return model
+
+        def set_training_scope(model: nn.Module) -> tuple[str, ...]:
+            for parameter in model.parameters():
+                parameter.requires_grad_(False)
+            modules = dict(model.named_modules())
+            for name in layer_names:
+                layer = modules.get(name)
+                if layer is None:
+                    raise RuntimeError(f"GPT-2 fine-tuning layer is missing: {name}")
+                for parameter in layer.parameters():
+                    parameter.requires_grad_(True)
+            return tuple(
+                name for name, parameter in model.named_parameters() if parameter.requires_grad
+            )
+
+        def evaluate(model: nn.Module, loader, mode: str, label: str,
+                     start_percent: int, end_percent: int) -> dict:
+            model.eval().to(resources.device)
+            total_loss = 0.0
+            correct = tokens = batches = 0
+            limit = request.max_eval_batches
+            total_batches = len(loader) if limit is None else min(len(loader), limit)
+            with torch.inference_mode():
+                for batch_index, (inputs, targets) in enumerate(loader):
+                    if limit is not None and batch_index >= limit:
+                        break
+                    self._cancelled(cancel)
+                    inputs, targets = inputs.to(resources.device), targets.to(resources.device)
+                    logits, loss = model(inputs, targets)
+                    count = targets.numel()
+                    total_loss += float(loss) * count
+                    correct += int((logits.argmax(-1) == targets).sum())
+                    tokens += count
+                    batches += 1
+                    if batches == 1 or batches % 10 == 0 or batches == total_batches:
+                        percent = start_percent + round(
+                            (end_percent - start_percent) * batches / max(total_batches, 1)
+                        )
+                        notify(percent, f"Evaluating {label}: {batches}/{total_batches} batches", None)
+            model.cpu()
+            if resources.device.type == "cuda":
+                torch.cuda.empty_cache()
+            if tokens == 0:
+                raise RuntimeError("GPT-2 evaluation processed no target tokens")
+            average = total_loss / tokens
+            return {
+                "mode": mode, "loss": average,
+                "perplexity": math.exp(min(average, 50.0)),
+                "accuracy": correct / tokens, "token_accuracy": correct / tokens,
+                "correct": correct, "samples": tokens, "batches": batches,
+            }
+
+        notify(1, "Evaluating GPT-2 Small baseline", None)
+        baseline_float = base_model()
+        before_float = evaluate(baseline_float, test_loader, "float", "baseline float", 1, 3)
+        del baseline_float
+        baseline_ideal = differential_model(ideal_lut, ste=False)
+        before_ideal = evaluate(
+            baseline_ideal, test_loader, "ideal_differential", "baseline ideal differential", 3, 6,
+        )
+        del baseline_ideal
+        baseline_device = differential_model(device_lut, ste=False)
+        before_device = evaluate(
+            baseline_device, test_loader, "device_differential", "baseline device differential", 6, 9,
+        )
+        del baseline_device
+        before = {
+            "float": before_float,
+            "ideal_differential": before_ideal,
+            "device_differential": before_device,
+        }
+
+        model = differential_model(device_lut, ste=True).to(resources.device)
+        trainable_names = set_training_scope(model)
+        initial_trainable = {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in model.named_parameters() if parameter.requires_grad
+        }
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=request.learning_rate,
+        )
+        history: list[dict] = []
+        best_loss = float("inf")
+        best_state: dict[str, torch.Tensor] = {}
+        per_epoch = len(train_loader)
+        if request.max_train_batches is not None:
+            per_epoch = min(per_epoch, request.max_train_batches)
+        total_batches = per_epoch * request.epochs
+        completed_batches = 0
+        accumulation = request.gradient_accumulation_steps
+        for epoch in range(request.epochs):
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            total_loss = 0.0
+            correct = tokens = epoch_batches = 0
+            for batch_index, (inputs, targets) in enumerate(train_loader):
+                if request.max_train_batches is not None and batch_index >= request.max_train_batches:
+                    break
+                self._cancelled(cancel)
+                inputs, targets = inputs.to(resources.device), targets.to(resources.device)
+                logits, loss = model(inputs, targets)
+                if not torch.isfinite(loss):
+                    raise RuntimeError("Non-finite loss in GPT-2 error-aware training")
+                (loss / accumulation).backward()
+                epoch_batches += 1
+                if epoch_batches % accumulation == 0 or epoch_batches == per_epoch:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                count = targets.numel()
+                total_loss += float(loss.detach()) * count
+                correct += int((logits.argmax(-1) == targets).sum())
+                tokens += count
+                completed_batches += 1
+                if completed_batches == 1 or completed_batches % 10 == 0:
+                    notify(
+                        10 + round(60 * completed_batches / max(total_batches, 1)),
+                        f"GPT-2 epoch {epoch + 1}/{request.epochs}: "
+                        f"{completed_batches}/{total_batches} batches",
+                        {"train_loss": total_loss / tokens,
+                         "train_accuracy": correct / tokens, "samples": tokens},
+                    )
+            if tokens == 0:
+                raise RuntimeError("No GPT-2 training tokens were processed")
+            validation = evaluate(
+                model, validation_loader, "device_differential", "GPT-2 validation", 70, 75,
+            )
+            record = {
+                "epoch": epoch + 1, "train_loss": total_loss / tokens,
+                "train_perplexity": math.exp(min(total_loss / tokens, 50.0)),
+                "train_token_accuracy": correct / tokens,
+                "validation_loss": validation["loss"],
+                "validation_perplexity": validation["perplexity"],
+                "validation_token_accuracy": validation["token_accuracy"],
+                "train_tokens": tokens, "validation_tokens": validation["samples"],
+            }
+            history.append(record)
+            notify(75, f"GPT-2 epoch {epoch + 1} complete", record)
+            if validation["loss"] < best_loss:
+                best_loss = validation["loss"]
+                best_state = {
+                    name: parameter.detach().cpu().clone()
+                    for name, parameter in model.named_parameters()
+                    if name in trainable_names
+                }
+        del model
+        if resources.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        trained_float = base_model(); apply_trainable_state(trained_float, best_state)
+        after_float = evaluate(trained_float, test_loader, "float", "trained float", 78, 85)
+        del trained_float
+        trained_ideal = differential_model(ideal_lut, ste=False, trained=best_state)
+        after_ideal = evaluate(
+            trained_ideal, test_loader, "ideal_differential", "trained ideal differential", 85, 92,
+        )
+        del trained_ideal
+        trained_device = differential_model(device_lut, ste=False, trained=best_state)
+        after_device = evaluate(
+            trained_device, test_loader, "device_differential", "trained device differential", 92, 99,
+        )
+        del trained_device
+        after = {
+            "float": after_float,
+            "ideal_differential": after_ideal,
+            "device_differential": after_device,
+        }
+
+        delta_sq = 0.0
+        max_delta = 0.0
+        changed = 0
+        for name, initial in initial_trainable.items():
+            delta = best_state[name] - initial
+            delta_sq += float(delta.double().square().sum())
+            maximum = float(delta.abs().max())
+            max_delta = max(max_delta, maximum)
+            changed += int(maximum > 0)
+        weight_update = {
+            "source_checkpoint_sha256": _state_digest(_checkpoint_state(resources.checkpoint)),
+            "initial_sha256": _state_digest(initial_trainable),
+            "trained_sha256": _state_digest(best_state),
+            "l2_delta": delta_sq ** 0.5, "max_abs_delta": max_delta,
+            "changed_parameter_tensors": changed,
+            "trainable_parameter_count": sum(value.numel() for value in best_state.values()),
+        }
+        checkpoint_path = output / "gpt2_small_eat_checkpoint.pt"
+        history_path = output / "history.json"
+        result_path = output / "training_result.json"
+        deployment = base_model(); apply_trainable_state(deployment, best_state)
+        torch.save({
+            "model_state_dict": deployment.state_dict(),
+            "best_model_state_dict": deployment.state_dict(),
+            "trainable_state_dict": best_state,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "metadata": {
+                "training": "GPT-2 Small final projections; device-LUT STE",
+                "model_id": resources.model_id, "dataset": resources.dataset_name,
+                "lambda": request.error_strength, "differential_layers": layer_names,
+                "history": history,
+            },
+        }, checkpoint_path)
+        del deployment
+        history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+        request_payload = asdict(request)
+        for key, value in list(request_payload.items()):
+            if isinstance(value, Path):
+                request_payload[key] = str(value)
+        elapsed = perf_counter() - started
+        payload = {
+            "status": "completed", "model_id": resources.model_id,
+            "dataset": resources.dataset_name,
+            "formal_evaluation": request.max_eval_batches is None,
+            "config": request_payload,
+            "resolved_resources": {
+                "checkpoint": str(resources.checkpoint), "auxiliary": str(resources.auxiliary),
+                "error_model": str(resources.error_model),
+                "dataset_root": str(resources.dataset_root), "tokenizer": str(tokenizer_root),
+            },
+            "training_strategy": {
+                "scope": "last_transformer_block_attention_and_mlp_output_projections",
+                "differential_layers": list(layer_names),
+                "trainable_parameter_names": sorted(trainable_names),
+                "trainable_parameter_count": weight_update["trainable_parameter_count"],
+                "effective_train_batch_size": train_loader.batch_size,
+                "gradient_accumulation_steps": accumulation,
+                "sequence_length": request.sequence_length,
+            },
+            "device": str(resources.device), "elapsed_seconds": elapsed,
+            "history": history, "evaluations": {"before": before, "after": after},
+            "weight_update": weight_update,
+            "artifacts": {"checkpoint": str(checkpoint_path), "history": str(history_path)},
+        }
+        result_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        notify(100, "GPT-2 Small training and evaluation completed", history[-1])
+        return TrainingOutcome(
+            str(checkpoint_path), str(history_path), str(result_path), str(output),
+            str(resources.device), elapsed, tuple(history), payload["evaluations"], weight_update,
         )
 
     def _evaluate(

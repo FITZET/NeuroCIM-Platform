@@ -2170,6 +2170,30 @@ class ErrorAwareTrainingWidget(QWidget):
         self.batch_spin.setRange(1, 4096)
         self.batch_spin.setValue(128)
         form.addRow("Batch size", self.batch_spin)
+        self.learning_rate_spin = QDoubleSpinBox()
+        self.learning_rate_spin.setDecimals(7)
+        self.learning_rate_spin.setRange(0.0000001, 0.01)
+        self.learning_rate_spin.setSingleStep(0.00001)
+        self.learning_rate_spin.setValue(0.0001)
+        form.addRow("学习率", self.learning_rate_spin)
+        self.sequence_length_spin = QSpinBox()
+        self.sequence_length_spin.setRange(2, 1024)
+        self.sequence_length_spin.setValue(64)
+        form.addRow("文本序列长度", self.sequence_length_spin)
+        self.gradient_accumulation_spin = QSpinBox()
+        self.gradient_accumulation_spin.setRange(1, 128)
+        self.gradient_accumulation_spin.setValue(1)
+        form.addRow("梯度累积批数", self.gradient_accumulation_spin)
+        self.max_train_batches_spin = QSpinBox()
+        self.max_train_batches_spin.setRange(0, 1_000_000)
+        self.max_train_batches_spin.setValue(0)
+        self.max_train_batches_spin.setSpecialValueText("完整训练集")
+        form.addRow("每轮最大训练批数", self.max_train_batches_spin)
+        self.max_eval_batches_spin = QSpinBox()
+        self.max_eval_batches_spin.setRange(0, 1_000_000)
+        self.max_eval_batches_spin.setValue(0)
+        self.max_eval_batches_spin.setSpecialValueText("完整评估集")
+        form.addRow("每种模式最大评估批数", self.max_eval_batches_spin)
         self.device_combo = QComboBox()
         self.device_combo.addItems(["auto", "cuda", "cpu"])
         form.addRow("Device", self.device_combo)
@@ -2203,8 +2227,10 @@ class ErrorAwareTrainingWidget(QWidget):
         self.summary = QLabel("Not run")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        self.metrics_table = QTableWidget(0, 4)
-        self.metrics_table.setHorizontalHeaderLabels(["Stage", "Mode", "Accuracy", "Loss"])
+        self.metrics_table = QTableWidget(0, 5)
+        self.metrics_table.setHorizontalHeaderLabels(
+            ["Stage", "Mode", "Accuracy / token accuracy", "Loss", "Perplexity"]
+        )
         layout.addWidget(self.metrics_table)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -2242,16 +2268,41 @@ class ErrorAwareTrainingWidget(QWidget):
             if self.require_workflow: self.run_button.setEnabled(False)
             return
         self.model_edit.setText(str(values["network_model"]))
-        if str(values["network_model"]) in {"gpt2-small", "gpt2-large"}:
+        if str(values["network_model"]) == "gpt2-large":
             self.dataset_name.setText(str(values["dataset_name"]))
             self.dataset_edit.setText(str(values["dataset_root"]))
             self.checkpoint_edit.setText(str(values["checkpoint_path"]))
             self.auxiliary_edit.setText(str(values["auxiliary_path"] or ""))
             self.summary.setText(
-                "已继承 GPT-2 文本生成配置。当前训练服务只支持图像分类模型，"
-                "GPT-2 误差感知微调需要文本训练语料，暂不可启动。"
+                "已继承 GPT-2 Large 配置。当前版本只开放 GPT-2 Small 误差感知微调；"
+                "Large 在 12 GB 显卡上不启动训练。"
             )
             self.run_button.setEnabled(False)
+            return
+        if str(values["network_model"]) == "gpt2-small":
+            corpus = self.project_root / "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1"
+            self.dataset_name.setText("WikiText-2")
+            self.dataset_edit.setText(str(corpus))
+            self.checkpoint_edit.setText(str(values["checkpoint_path"]))
+            self.auxiliary_edit.setText(str(values["auxiliary_path"] or ""))
+            self.device_combo.setCurrentText(str(values["device"]))
+            self.batch_spin.setValue(1)
+            self.learning_rate_spin.setValue(0.00002)
+            self.sequence_length_spin.setValue(64)
+            self.gradient_accumulation_spin.setValue(8)
+            self.max_train_batches_spin.setValue(100)
+            self.max_eval_batches_spin.setValue(10)
+            index = self.error_model_combo.findData(values["error_model_id"])
+            if index >= 0:
+                self.error_model_combo.blockSignals(True)
+                self.error_model_combo.setCurrentIndex(index)
+                self.error_model_combo.blockSignals(False)
+                self._sync_training_error_path()
+            self.summary.setText(
+                "已继承 GPT-2 Small 配置。训练将冻结主干，只更新最后一个 Transformer "
+                "Block 的 attn.c_proj 与 mlp.c_proj，并使用 WikiText-2 和所选器件 LUT。"
+            )
+            self.run_button.setEnabled(bool(self.error_model_combo.currentData()))
             return
         inherited_model = str(values["network_model"])
         if inherited_model == "tinytransformer-cifar10" and self.batch_spin.value() > 128:
@@ -2306,6 +2357,11 @@ class ErrorAwareTrainingWidget(QWidget):
             checkpoint_path=Path(self.checkpoint_edit.text().strip()),
             auxiliary_path=(Path(self.auxiliary_edit.text().strip())
                             if self.auxiliary_edit.text().strip() else None),
+            learning_rate=self.learning_rate_spin.value(),
+            sequence_length=self.sequence_length_spin.value(),
+            gradient_accumulation_steps=self.gradient_accumulation_spin.value(),
+            max_train_batches=(self.max_train_batches_spin.value() or None),
+            max_eval_batches=(self.max_eval_batches_spin.value() or None),
         )
 
     def start_training(self, output_dir: Path | None = None) -> None:
@@ -2338,6 +2394,11 @@ class ErrorAwareTrainingWidget(QWidget):
                 "TinyTransformer fine-tuning: frozen backbone, trainable attention-pooling "
                 "and classifier heads; the frozen backbone uses float forward."
             )
+        elif request.model_id == "gpt2-small":
+            self.log.appendPlainText(
+                "GPT-2 Small 微调：冻结主干，只训练最后一个 Transformer Block 的两个 "
+                "c_proj；器件 LUT 前向、STE 反向。"
+            )
         self.worker = TrainingThread(self.service, request)
         self.worker.progressed.connect(self._training_progressed)
         self.worker.succeeded.connect(self._training_succeeded)
@@ -2365,7 +2426,10 @@ class ErrorAwareTrainingWidget(QWidget):
         rows = []
         for stage in ("before", "after"):
             for mode, result in outcome.evaluations[stage].items():
-                rows.append((stage, mode, result["accuracy"], result["loss"]))
+                rows.append((
+                    stage, mode, result["accuracy"], result["loss"],
+                    result.get("perplexity", "-"),
+                ))
         self.metrics_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
             for column, value in enumerate(values):

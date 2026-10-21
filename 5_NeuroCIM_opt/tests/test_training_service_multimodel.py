@@ -24,6 +24,7 @@ from neurocim_opt.training_service import (
     ("MobileNet-V2", "mobilenetv2-cifar10"),
     ("VGG11-BN", "vgg11-bn-cifar10"),
     ("SqueezeNet1.1", "squeezenet1_1-cifar10"),
+    ("GPT-2-Small", "gpt2-small"),
 ])
 def test_canonical_model_aliases(alias: str, expected: str) -> None:
     assert canonical_model_id(alias) == expected
@@ -108,6 +109,29 @@ def test_cifar_raw_file_selection_is_normalised_to_torchvision_root(tmp_path: Pa
         dataset_root=selected, checkpoint_path=checkpoint, auxiliary_path=scales,
     ))
     assert resources.dataset_root == selected.parent.parent.resolve()
+
+
+def test_gpt2_small_validation_uses_wikitext_and_rejects_large(tmp_path: Path) -> None:
+    model_root = tmp_path / "3_models/GPT2"
+    checkpoint = _file(model_root / "checkpoint/gpt2_nanogpt.pt")
+    scales = _file(model_root / "checkpoint/input_scales.json", "{}")
+    (model_root / "checkpoint/tokenizer").mkdir(parents=True)
+    corpus = model_root / "checkpoint/gpt2-large/wikitext-2-raw-v1"
+    for name in ("wiki.train.raw", "wiki.valid.raw", "wiki.test.raw"):
+        _file(corpus / name, "enough text")
+    error = _file(tmp_path / "fit/error_model.json", "{}")
+    resources = ErrorAwareTrainingService().validate(TrainingRequest(
+        tmp_path, error, tmp_path / "out", model_id="gpt2-small",
+        dataset_root=model_root / "checkpoint/tokenizer",
+        checkpoint_path=checkpoint, auxiliary_path=scales,
+        batch_size=1, sequence_length=8,
+    ))
+    assert resources.dataset_name == "wikitext2"
+    assert resources.dataset_root == corpus.resolve()
+    with pytest.raises(ValueError, match="Unsupported training model"):
+        ErrorAwareTrainingService().validate(TrainingRequest(
+            tmp_path, error, tmp_path / "out", model_id="gpt2-large",
+        ))
 
 
 def test_evaluation_honours_cancel_and_batch_limit() -> None:

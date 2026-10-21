@@ -45,7 +45,7 @@ def test_builtin_specs_expose_resources_capabilities_and_provenance() -> None:
     registry = builtin_registry(PROJECT)
     image_specs = registry.list(capability="error_aware_training")
     assert [item.model_id for item in image_specs] == [
-        "bnn-mnist", "lenet5-mnist", "mobilenetv2-cifar10",
+        "bnn-mnist", "gpt2-small", "lenet5-mnist", "mobilenetv2-cifar10",
         "resnet20-cifar10", "resnet8-mnist", "squeezenet1_1-cifar10",
         "tinytransformer-cifar10", "vgg11-bn-cifar10",
     ]
@@ -90,7 +90,7 @@ def test_builtin_specs_expose_resources_capabilities_and_provenance() -> None:
     assert gpt2.dataset_root is None
     assert gpt2.class_names == ()
     assert gpt2.supports("text_generation")
-    assert not gpt2.supports("error_aware_training")
+    assert gpt2.supports("error_aware_training")
     large = registry.get("gpt2-large")
     assert large.dataset_root == PROJECT / "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1"
     assert large.checkpoint.name == "model.safetensors"
