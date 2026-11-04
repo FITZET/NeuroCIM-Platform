@@ -55,7 +55,12 @@ def test_gui_can_preview_real_mac_data(tmp_path: Path) -> None:
 def test_main_window_shows_live_model_catalog() -> None:
     application = QApplication.instance() or QApplication([])
     window = MainWindow(ROOT)
-    tabs = window.centralWidget()
+    assert len(window.navigation_buttons) == 7
+    assert window.shell_stack.currentWidget() is window.home_page
+    # The redesigned window wraps the established business-page tab container
+    # in a top bar/sidebar shell.  Keep asserting the same page ownership via
+    # its compatibility attribute.
+    tabs = window.tabs
     assert tabs.count() == 5
     assert all(tabs.tabText(index) != "NeuroSim PPA" for index in range(tabs.count()))
     catalog = tabs.widget(1).findChild(ModelCatalogWidget)
@@ -75,6 +80,12 @@ def test_main_window_shows_live_model_catalog() -> None:
     assert Path(gpt2.checkpoint_edit.text()).is_file()
     assert Path(gpt2.tokenizer_edit.text()).is_dir()
     assert all(tabs.tabText(index) != "GPT-2 文本生成" for index in range(tabs.count()))
+    window._show_navigation_page(4)
+    assert window.shell_stack.currentWidget() is tabs
+    assert tabs.currentIndex() == 2
+    window._show_navigation_page(1)
+    assert tabs.currentIndex() == 0
+    assert window.analysis_tabs.currentIndex() == 0
     application.processEvents()
     window.close()
 
@@ -452,6 +463,6 @@ def test_ppa_worker_surfaces_missing_resource_error(tmp_path: Path) -> None:
     application.processEvents()
     assert widget.last_outcome is None
     assert "Required NeuroSim resources are missing" in widget.log.toPlainText()
-    assert "PPA evaluation failed" in widget.summary.text()
+    assert "PPA 评估失败" in widget.summary.text()
     assert widget.run_button.isEnabled()
     widget.close()

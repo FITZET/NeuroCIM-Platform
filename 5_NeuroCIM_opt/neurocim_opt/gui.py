@@ -13,7 +13,7 @@ import numpy as np
 from PySide6.QtCore import QEvent, QObject, QSize, QSettings, QThread, QTimer, Signal, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox as _QComboBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+    QApplication, QButtonGroup, QCheckBox, QComboBox as _QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QProgressDialog, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
     QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
@@ -66,7 +66,7 @@ def _populate_image_model_combo(combo: _QComboBox, project_root: Path, capabilit
         item = combo.model().item(combo.count() - 1)
         if item is not None and not spec.checkpoint_available:
             item.setEnabled(False)
-            item.setToolTip(f"正式 checkpoint 尚未安装：{spec.checkpoint}")
+            item.setToolTip(f"正式 Checkpoint 尚未安装：{spec.checkpoint}")
     return registry
 
 
@@ -262,7 +262,7 @@ class WorkflowCoordinator(QObject):
     def select_network_model(self, model_id: str) -> dict[str, Any]:
         spec = self.model_registry.get(model_id)
         if not spec.resources_available:
-            raise FileNotFoundError(f"模型 checkpoint 未安装：{spec.checkpoint}")
+            raise FileNotFoundError(f"模型 Checkpoint 未安装：{spec.checkpoint}")
         result = self.context.select_network_model(
             model_id=spec.model_id, task=spec.task,
             dataset_name=spec.datasets[0] if spec.datasets else "",
@@ -311,7 +311,7 @@ def configure_windows_font(application: QApplication) -> None:
         font_id = QFontDatabase.addApplicationFont(str(font_path))
         families = QFontDatabase.applicationFontFamilies(font_id)
         if families:
-            application.setFont(QFont(families[0], 9))
+            application.setFont(QFont(families[0], 11))
 
 
 APPLICATION_STYLE_SHEET = """
@@ -319,6 +319,24 @@ QMainWindow, QWidget {
     background-color: #F4F7FB;
     color: #172033;
 }
+QFrame#topBar { background-color: #172231; border: none; }
+QLabel#brandTitle { color: #FFFFFF; font-size: 17px; font-weight: 700; }
+QLabel#brandSubtitle, QLabel#topStatus { color: #AFC0D4; font-size: 10px; }
+QLabel#brandMark { min-width: 40px; min-height: 40px; max-width: 40px; max-height: 40px; border-radius: 9px; background-color: #1976C9; color: #FFFFFF; font-size: 20px; font-weight: 700; }
+QPushButton[topTool="true"] { min-height: 34px; border: 1px solid #3B4A5E; border-radius: 7px; background-color: #223044; color: #E6EDF5; }
+QPushButton[topTool="true"]:hover { background-color: #2C3D54; border-color: #58708D; color: #FFFFFF; }
+QFrame#sideBar { background-color: #FFFFFF; border-right: 1px solid #DCE4ED; }
+QLabel#navCaption { color: #8795A8; font-size: 10px; font-weight: 600; }
+QPushButton[nav="true"] { min-height: 43px; padding: 0 12px; border: none; border-left: 3px solid transparent; border-radius: 7px; background: transparent; color: #47586E; text-align: left; }
+QPushButton[nav="true"]:hover { background-color: #F1F6FC; color: #126DBF; }
+QPushButton[nav="true"]:checked { background-color: #E5F1FC; border-left: 3px solid #1976C9; color: #0867B9; font-weight: 700; }
+QFrame#sideStatus { border: 1px solid #D7E2EE; border-radius: 9px; background-color: #F5F9FD; }
+QLabel#homeTitle { color: #172231; font-size: 24px; font-weight: 700; }
+QLabel#contentTitle { color: #172231; font-size: 22px; font-weight: 700; }
+QLabel#contentSubtitle { color: #687A91; }
+QLabel#homeHero { color: #126DBF; font-size: 25px; font-weight: 700; }
+QLabel[muted="true"] { color: #687A91; }
+QFrame[dashboardCard="true"] { border: 1px solid #D7E2EE; border-radius: 10px; background-color: #FFFFFF; }
 QWidget#pageContent, QScrollArea#pageScroll > QWidget > QWidget {
     background-color: #F4F7FB;
 }
@@ -522,6 +540,114 @@ def apply_application_style(application: QApplication) -> None:
     """Apply the shared light desktop theme without replacing any widgets."""
     application.setStyle("Fusion")
     application.setStyleSheet(APPLICATION_STYLE_SHEET)
+
+
+def _fit_result_table_height(
+    table: QTableWidget, *, max_visible_rows: int = 8, empty_rows: int = 1
+) -> None:
+    """Size short result tables to their content and scroll only long results."""
+    row_count = table.rowCount()
+    visible_rows = min(max_visible_rows, max(row_count, empty_rows))
+    row_height = max(30, table.verticalHeader().defaultSectionSize())
+    header_height = max(32, table.horizontalHeader().height())
+    height = header_height + visible_rows * row_height + table.frameWidth() * 2 + 4
+    table.setFixedHeight(height)
+    table.setVerticalScrollBarPolicy(
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        if row_count > max_visible_rows else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+
+
+def _mode_display_name(mode: str) -> str:
+    return {
+        "float": "浮点模型",
+        "ideal_differential": "理想差分",
+        "device_differential": "器件误差差分",
+        "baseline float": "训练前浮点模型",
+        "baseline ideal differential": "训练前理想差分",
+        "baseline device differential": "训练前器件误差差分",
+        "trained float": "训练后浮点模型",
+        "trained ideal differential": "训练后理想差分",
+        "trained device differential": "训练后器件误差差分",
+    }.get(mode, mode)
+
+
+def _stage_display_name(stage: str) -> str:
+    return {"before": "训练前", "after": "训练后"}.get(stage, stage)
+
+
+def _task_display_name(task: str) -> str:
+    return {
+        "image_classification": "图像分类",
+        "text_generation": "文本生成",
+        "language_modeling": "语言建模",
+    }.get(task, task)
+
+
+def _column_display_name(name: str) -> str:
+    return {
+        "model": "模型",
+        "equation": "公式",
+        "array": "阵列",
+        "array_rows": "阵列行数",
+        "array_cols": "阵列列数",
+        "bit_width": "位宽",
+        "group": "实验组",
+        "samples": "样本数",
+        "r2": "R²",
+        "polynomial_r2": "多项式 R²",
+        "rmse": "RMSE",
+        "nonlinearity_percent_fs": "满量程非线性度（% FS）",
+        "nl_percent_fs": "满量程非线性度（% FS）",
+        "ideal_mac": "理想 MAC",
+        "measured_output": "测量输出",
+    }.get(name, name)
+
+
+def _setup_device_combo(combo: QComboBox) -> None:
+    combo.addItem("自动选择", "auto")
+    combo.addItem("cuda", "cuda")
+    combo.addItem("CPU", "cpu")
+
+
+def _device_value(combo: QComboBox) -> str:
+    return str(combo.currentData() or combo.currentText()).lower()
+
+
+def _select_device(combo: QComboBox, value: str) -> None:
+    index = combo.findData(str(value).lower())
+    if index >= 0:
+        combo.setCurrentIndex(index)
+
+
+def _translate_runtime_message(message: str) -> str:
+    """Translate service progress text while preserving model names and metrics."""
+    exact = {
+        "Training and evaluation completed": "训练与评估完成",
+        "GPT-2 Small training and evaluation completed": "GPT-2 Small 训练与评估完成",
+        "GPT-2 generation completed": "GPT-2 生成完成",
+        "Calibrating GPT-2 Large input scales from the prompt": "正在根据提示词校准 GPT-2 Large 输入尺度",
+    }
+    if message in exact:
+        return exact[message]
+    translated = message
+    for source in (
+        "baseline ideal differential", "baseline device differential", "baseline float",
+        "trained ideal differential", "trained device differential", "trained float",
+        "ideal_differential", "device_differential", "float",
+    ):
+        translated = translated.replace(source, _mode_display_name(source))
+    for source, target in (
+        ("Evaluating trained ", "正在评估训练后的 "),
+        ("Evaluating ", "正在评估 "),
+        ("Preparing ", "正在准备 "),
+        (" complete", " 完成"),
+        (" batches", " 个 Batch"),
+        (" tokens", " 个 Token"),
+        ("Epoch ", "Epoch "),
+    ):
+        translated = translated.replace(source, target)
+    return translated
 
 
 class MacFitThread(QThread):
@@ -1167,33 +1293,33 @@ class MacAnalysisWidget(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        source_group = QGroupBox("Array MAC data")
+        source_group = QGroupBox("阵列 MAC 数据")
         source_layout = QGridLayout(source_group)
         self.path_edit = QLineEdit()
         self.path_edit.textChanged.connect(self._source_changed)
-        browse = QPushButton("Select CSV")
+        browse = QPushButton("选择 CSV")
         browse.clicked.connect(self._browse_source)
-        source_layout.addWidget(QLabel("File"), 0, 0)
+        source_layout.addWidget(QLabel("文件"), 0, 0)
         source_layout.addWidget(self.path_edit, 0, 1)
         source_layout.addWidget(browse, 0, 2)
         self.encoding = QComboBox()
-        for label, value in (("Auto", None), ("UTF-8", "utf-8-sig"), ("GBK", "gb18030")):
+        for label, value in (("自动识别", None), ("UTF-8", "utf-8-sig"), ("GBK", "gb18030")):
             self.encoding.addItem(label, value)
         self.delimiter = QComboBox()
-        for label, value in (("Auto", None), ("Comma", ","), ("Semicolon", ";")):
+        for label, value in (("自动识别", None), ("逗号", ","), ("分号", ";")):
             self.delimiter.addItem(label, value)
         self.missing = QComboBox()
-        for label, value in (("Report error", "error"), ("Drop rows", "drop"), ("Interpolate", "interpolate")):
+        for label, value in (("遇到缺失值时报错", "error"), ("删除缺失行", "drop"), ("插值填充", "interpolate")):
             self.missing.addItem(label, value)
-        source_layout.addWidget(QLabel("Encoding"), 1, 0)
+        source_layout.addWidget(QLabel("文件编码"), 1, 0)
         source_layout.addWidget(self.encoding, 1, 1)
-        source_layout.addWidget(QLabel("Delimiter"), 2, 0)
+        source_layout.addWidget(QLabel("分隔符"), 2, 0)
         source_layout.addWidget(self.delimiter, 2, 1)
-        source_layout.addWidget(QLabel("Missing values"), 3, 0)
+        source_layout.addWidget(QLabel("缺失值处理"), 3, 0)
         source_layout.addWidget(self.missing, 3, 1)
         root.addWidget(source_group)
 
-        config_group = QGroupBox("Array configuration filter")
+        config_group = QGroupBox("阵列配置筛选")
         config = QHBoxLayout(config_group)
         self.array_rows = QSpinBox(); self.array_rows.setObjectName("macArrayRows")
         self.array_rows.setRange(1, 8192); self.array_rows.setValue(16)
@@ -1202,11 +1328,11 @@ class MacAnalysisWidget(QWidget):
         self.bit_width = QComboBox(); self.bit_width.setObjectName("macBitWidth")
         for bits in (1, 2, 4, 8): self.bit_width.addItem(f"{bits}-bit", bits)
         self.bit_width.setCurrentIndex(1)
-        for label, widget in (("Rows", self.array_rows), ("Columns", self.array_cols), ("Precision", self.bit_width)):
+        for label, widget in (("行数", self.array_rows), ("列数", self.array_cols), ("位宽", self.bit_width)):
             config.addWidget(QLabel(label)); config.addWidget(widget)
         config.addStretch(); root.addWidget(config_group)
 
-        mapping_group = QGroupBox("Column mapping (blank means automatic)")
+        mapping_group = QGroupBox("列映射（留空时自动识别）")
         mapping_layout = QFormLayout(mapping_group)
         self.mapping_edits: dict[str, QLineEdit] = {}
         for logical, label in LOGICAL_COLUMNS:
@@ -1215,18 +1341,18 @@ class MacAnalysisWidget(QWidget):
         root.addWidget(mapping_group)
 
         controls = QHBoxLayout()
-        self.preview_button = QPushButton("Preview and validate"); self.preview_button.clicked.connect(self.preview)
+        self.preview_button = QPushButton("预览并校验"); self.preview_button.clicked.connect(self.preview)
         self.degree = QSpinBox(); self.degree.setRange(1, 3); self.degree.setValue(2)
-        self.fit_button = QPushButton("Fit selected configuration"); self.fit_button.clicked.connect(self.start_fit)
-        self.export_button = QPushButton("Export results"); self.export_button.setEnabled(False)
+        self.fit_button = QPushButton("拟合选中配置"); self.fit_button.clicked.connect(self.start_fit)
+        self.export_button = QPushButton("导出结果"); self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_results)
-        self.clear_log_button = QPushButton("Clear log")
-        self.export_log_button = QPushButton("Export log")
-        for widget in (self.preview_button, QLabel("Polynomial degree"), self.degree, self.fit_button,
+        self.clear_log_button = QPushButton("清空日志")
+        self.export_log_button = QPushButton("导出日志")
+        for widget in (self.preview_button, QLabel("多项式阶数"), self.degree, self.fit_button,
                        self.export_button, self.clear_log_button, self.export_log_button): controls.addWidget(widget)
         controls.addStretch(); root.addLayout(controls)
 
-        self.metrics_summary = QLabel("R\u00b2: --    Full-scale nonlinearity: --    RMSE: --")
+        self.metrics_summary = QLabel("R²：--    满量程非线性度：--    RMSE：--")
         self.metrics_summary.setObjectName("macMetricsSummary"); root.addWidget(self.metrics_summary)
         splitter = QSplitter(); self.table = QTableWidget(); self.table.setAlternatingRowColors(True)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
@@ -1243,16 +1369,16 @@ class MacAnalysisWidget(QWidget):
     def _selection(self) -> dict[str, int]:
         rows, cols, bits = self.array_rows.value(), self.array_cols.value(), int(self.bit_width.currentData())
         if rows <= 0 or cols <= 0 or bits not in (1, 2, 4, 8):
-            raise ValueError("Rows/columns must be positive and precision must be 1/2/4/8-bit")
+            raise ValueError("阵列行数和列数必须为正数，位宽必须为 1、2、4 或 8 bit")
         return {"array_rows": rows, "array_cols": cols, "bit_width": bits}
 
     def _source(self) -> Path:
         text = self.path_edit.text().strip()
-        if not text: raise ValueError("Select an array MAC CSV file")
+        if not text: raise ValueError("请选择阵列 MAC CSV 文件")
         return Path(text).expanduser().resolve()
 
     def _browse_source(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select array MAC data", self.path_edit.text(), "CSV (*.csv)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择阵列 MAC 数据", self.path_edit.text(), "CSV 文件 (*.csv)")
         if path: self.path_edit.setText(path); self.settings.setValue("mac/source", path)
 
     def _source_changed(self, text: str) -> None:
@@ -1277,7 +1403,7 @@ class MacAnalysisWidget(QWidget):
     def _show_records(self, records: list[dict[str, Any]]) -> None:
         columns = list(records[0]) if records else []
         self.table.setRowCount(len(records)); self.table.setColumnCount(len(columns))
-        self.table.setHorizontalHeaderLabels(columns)
+        self.table.setHorizontalHeaderLabels([_column_display_name(column) for column in columns])
         for row, record in enumerate(records):
             for column, name in enumerate(columns): self.table.setItem(row, column, QTableWidgetItem(str(record[name])))
         self.table.resizeColumnsToContents()
@@ -1288,31 +1414,31 @@ class MacAnalysisWidget(QWidget):
             frame, metadata = load_mac_csv(self._source(), column_mapping=options.column_mapping or None,
                 encoding=options.encoding, delimiter=options.delimiter, missing=options.missing, **selection)
             self._show_records(frame.head(20).to_dict(orient="records"))
-            self.log.appendPlainText(f"\u9884\u89c8\u6210\u529f: {len(frame)} rows; selection={metadata['selection']}")
+            self.log.appendPlainText(f"预览成功：{len(frame)} 行；选中配置={metadata['selection']}")
             self.progress.setValue(20)
-        except Exception as exc: self._show_error("Data preview failed", str(exc))
+        except Exception as exc: self._show_error("数据预览失败", str(exc))
 
     def start_fit(self, output_dir: Path | None = None) -> None:
         try:
             self._persist_settings(); source = self._source(); selection = self._selection()
             output = Path(output_dir) if output_dir else self.platform_root / "outputs" / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "mac_model"
             self.fit_button.setEnabled(False); self.preview_button.setEnabled(False); self.progress.setRange(0, 0)
-            self.log.appendPlainText(f"Fitting {source}; selection={selection}")
+            self.log.appendPlainText(f"正在拟合 {source}；选中配置={selection}")
             self.worker = MacFitThread(self.service, source, output, self._options(), **selection)
             self.worker.succeeded.connect(self._fit_succeeded); self.worker.failed.connect(self._fit_failed)
             self.worker.finished.connect(self._fit_finished); self.worker.start()
-        except Exception as exc: self._show_error("Cannot start fitting", str(exc))
+        except Exception as exc: self._show_error("无法开始拟合", str(exc))
 
     def _fit_succeeded(self, outcome: MacFitOutcome) -> None:
         self.last_results = list(outcome.summary); self._show_records(self.last_results)
         self.export_button.setEnabled(True)
         if self.last_results:
             result = self.last_results[0]
-            self.metrics_summary.setText(f"R\u00b2: {result['r2']:.4f}    Full-scale nonlinearity: {result['nonlinearity_percent_fs']:.6f}%    RMSE: {result['rmse']:.6g}")
-        self.log.appendPlainText(f"Fit complete: {outcome.model_path}")
+            self.metrics_summary.setText(f"R²：{result['r2']:.4f}    满量程非线性度：{result['nonlinearity_percent_fs']:.6f}%    RMSE：{result['rmse']:.6g}")
+        self.log.appendPlainText(f"拟合完成：{outcome.model_path}")
 
     def _fit_failed(self, details: str) -> None:
-        self.log.appendPlainText(details); self._show_error("Fit failed", details.splitlines()[-1])
+        self.log.appendPlainText(details); self._show_error("拟合失败", details.splitlines()[-1])
 
     def _fit_finished(self) -> None:
         self.progress.setRange(0, 100); self.progress.setValue(100 if self.last_results else 0)
@@ -1320,19 +1446,19 @@ class MacAnalysisWidget(QWidget):
 
     def export_results(self) -> None:
         if not self.last_results: return
-        path, selected = QFileDialog.getSaveFileName(self, "Export linearity results", "mac-linearity-results.xlsx", "Excel (*.xlsx);;CSV (*.csv)")
+        path, selected = QFileDialog.getSaveFileName(self, "导出线性度结果", "mac-linearity-results.xlsx", "Excel (*.xlsx);;CSV (*.csv)")
         if not path: return
         if not Path(path).suffix: path += ".xlsx" if "Excel" in selected else ".csv"
-        try: self.log.appendPlainText(f"Results exported: {self.service.export_table(self.last_results, path)}")
-        except Exception as exc: self._show_error("Export failed", str(exc))
+        try: self.log.appendPlainText(f"结果已导出：{self.service.export_table(self.last_results, path)}")
+        except Exception as exc: self._show_error("导出失败", str(exc))
 
     def export_log(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Export run log", "dram-cim-log.txt", "Text (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(self, "导出运行日志", "dram-cim-log.txt", "文本文件 (*.txt)")
         if path:
             try:
                 target = Path(path).expanduser().resolve(); target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(self.log.toPlainText(), encoding="utf-8")
-            except Exception as exc: self._show_error("Log export failed", str(exc))
+            except Exception as exc: self._show_error("日志导出失败", str(exc))
 
     def _show_error(self, title: str, message: str) -> None:
         self.log.appendPlainText(f"{title}: {message}")
@@ -1373,7 +1499,7 @@ class SingleInferenceWidget(QWidget):
         self._active_model_id = ""
         layout = QVBoxLayout(self)
         description = QLabel(
-            "选择网络、数据集、checkpoint 和器件误差模型，比较原生、理想差分和器件差分结果。"
+            "选择网络、数据集、Checkpoint 和器件误差模型，比较原生、理想差分和器件差分结果。"
         )
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -1403,7 +1529,7 @@ class SingleInferenceWidget(QWidget):
         error_button = QPushButton("选择文件"); error_button.clicked.connect(self._browse_error_model)
         error_button.setEnabled(not require_workflow)
         error_row.addWidget(error_button); form.addRow("器件误差模型", error_row)
-        self.device_combo = QComboBox(); self.device_combo.addItems(["auto", "cuda", "cpu"])
+        self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
         form.addRow("运行设备", self.device_combo)
         self.sample_index = QSpinBox(); self.sample_index.setRange(0, 9999)
         form.addRow("测试样本索引", self.sample_index)
@@ -1440,9 +1566,11 @@ class SingleInferenceWidget(QWidget):
         tables = QVBoxLayout()
         self.result_table = QTableWidget(0, 4)
         self.result_table.setHorizontalHeaderLabels(["模式", "预测标签", "置信度", "耗时 (ms)"])
+        _fit_result_table_height(self.result_table, max_visible_rows=3)
         tables.addWidget(self.result_table)
         self.top5_table = QTableWidget(0, 4)
         self.top5_table.setHorizontalHeaderLabels(["模式", "排名", "类别", "置信度"])
+        _fit_result_table_height(self.top5_table, max_visible_rows=8)
         tables.addWidget(self.top5_table)
         result_area.addLayout(tables, 3)
         layout.addLayout(result_area)
@@ -1462,7 +1590,7 @@ class SingleInferenceWidget(QWidget):
         self.model_combo.setCurrentIndex(max(0, self.model_combo.findData(saved_model)))
         self._load_model_settings(saved_model)
         self._active_model_id = saved_model
-        self.device_combo.setCurrentText(str(self.settings.value("inference/device", "auto")))
+        _select_device(self.device_combo, str(self.settings.value("inference/device", "auto")))
         self.model_combo.currentIndexChanged.connect(self._model_changed)
         if self.coordinator is not None:
             _fill_error_model_combo(self.error_model_combo, self.coordinator)
@@ -1632,11 +1760,11 @@ class SingleInferenceWidget(QWidget):
         if path: self.dataset_edit.setText(path)
 
     def _browse_checkpoint(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择 checkpoint", self.checkpoint_edit.text(), "PyTorch (*.pt *.pth);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择 Checkpoint", self.checkpoint_edit.text(), "PyTorch (*.pt *.pth);;所有文件 (*)")
         if path: self.checkpoint_edit.setText(path)
 
     def _browse_auxiliary(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择辅助参数", self.auxiliary_edit.text(), "JSON (*.json);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择辅助参数", self.auxiliary_edit.text(), "JSON (*.json);;所有文件 (*)")
         if path: self.auxiliary_edit.setText(path)
 
     def _browse_error_model(self) -> None:
@@ -1653,7 +1781,7 @@ class SingleInferenceWidget(QWidget):
         auxiliary = Path(values["auxiliary"]).expanduser().resolve() if values["auxiliary"] else None
         return (model_id, Path(values["root"]).expanduser().resolve(),
                 Path(values["checkpoint"]).expanduser().resolve(), auxiliary,
-                Path(values["error_model"]).expanduser().resolve(), self.device_combo.currentText())
+                Path(values["error_model"]).expanduser().resolve(), _device_value(self.device_combo))
 
     def start_inference(self) -> None:
         if self.worker is not None and self.worker.isRunning(): return
@@ -1719,15 +1847,16 @@ class SingleInferenceWidget(QWidget):
         self.top5_table.setRowCount(top_rows)
         top_row = 0
         for row, prediction in enumerate(outcome.predictions):
-            values = (prediction.mode, self._display_name(model_id, prediction.predicted_label),
+            values = (_mode_display_name(prediction.mode), self._display_name(model_id, prediction.predicted_label),
                       f"{prediction.confidence:.2%}", f"{prediction.elapsed_ms:.3f}")
             for column, value in enumerate(values):
                 self.result_table.setItem(row, column, QTableWidgetItem(value))
             for rank, (label, confidence) in enumerate(prediction.top5, 1):
-                for column, value in enumerate((prediction.mode, str(rank), self._display_name(model_id, label), f"{confidence:.2%}")):
+                for column, value in enumerate((_mode_display_name(prediction.mode), str(rank), self._display_name(model_id, label), f"{confidence:.2%}")):
                     self.top5_table.setItem(top_row, column, QTableWidgetItem(value))
                 top_row += 1
         self.result_table.resizeColumnsToContents(); self.top5_table.resizeColumnsToContents()
+        _fit_result_table_height(self.result_table, max_visible_rows=3); _fit_result_table_height(self.top5_table, max_visible_rows=8)
         self.log.appendPlainText("单样本推理完成")
         target = self.project_root / "5_NeuroCIM_opt/outputs/gui_inference"; target.mkdir(parents=True, exist_ok=True)
         result_path = target / f"{model_id}_sample_{outcome.sample_index}.json"
@@ -1764,9 +1893,9 @@ class BatchInferenceWidget(QWidget):
         "device_differential": "器件误差差分",
     }
     CHART_MODE_NAMES = {
-        "float": "Float",
-        "ideal_differential": "Ideal differential",
-        "device_differential": "Device-error differential",
+        "float": "浮点模型",
+        "ideal_differential": "理想差分",
+        "device_differential": "器件误差差分",
     }
 
     def __init__(self, project_root: Path, parent: QWidget | None = None,
@@ -1828,7 +1957,7 @@ class BatchInferenceWidget(QWidget):
         parameter_row.addWidget(QLabel("推理 batch")); parameter_row.addWidget(self.batch_size)
         parameter_row.addStretch(); form.addRow("统计设置", parameter_row)
 
-        self.device_combo = QComboBox(); self.device_combo.addItems(["auto", "cuda", "cpu"])
+        self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
         form.addRow("运行设备", self.device_combo)
         default_output = platform / "outputs/gui_batch_inference" / "batch_result.json"
         self.output_edit = QLineEdit(str(default_output))
@@ -1848,6 +1977,7 @@ class BatchInferenceWidget(QWidget):
 
         self.result_table = QTableWidget(0, 5)
         self.result_table.setHorizontalHeaderLabels(["模式", "正确数", "样本数", "总体准确率", "耗时 (ms)"])
+        _fit_result_table_height(self.result_table, max_visible_rows=3)
         layout.addWidget(self.result_table)
         chart_group = QGroupBox("每 N 个样本的平均准确率柱状图")
         chart_layout = QVBoxLayout(chart_group)
@@ -1954,7 +2084,7 @@ class BatchInferenceWidget(QWidget):
             checkpoint_path=Path(self.checkpoint_edit.text().strip()),
             quantization_path=Path(auxiliary) if auxiliary else None,
             error_model_path=Path(self.error_model_edit.text().strip()),
-            model_id=str(self.model_combo.currentData()), device=self.device_combo.currentText(),
+            model_id=str(self.model_combo.currentData()), device=_device_value(self.device_combo),
             sample_count=self.sample_count.value(), group_size=self.group_size.value(),
             inference_batch_size=self.batch_size.value(), output_path=Path(self.output_edit.text().strip()),
         )
@@ -1987,7 +2117,7 @@ class BatchInferenceWidget(QWidget):
         if missing:
             message = "缺少批量推理资源：\n" + "\n".join(missing)
             self.summary.setText(message); self.log.appendPlainText(message); return
-        self.last_outcome = None; self.result_table.setRowCount(0); self.progress.setValue(0)
+        self.last_outcome = None; self.result_table.setRowCount(0); self.progress.setValue(0); _fit_result_table_height(self.result_table, max_visible_rows=3)
         self.run_button.setEnabled(False); self.cancel_button.setEnabled(True)
         self.summary.setText("批量推理运行中")
         self.log.appendPlainText(
@@ -2001,7 +2131,7 @@ class BatchInferenceWidget(QWidget):
     def cancel_inference(self) -> None:
         if self.worker is not None and self.worker.isRunning():
             self.worker.request_cancel(); self.cancel_button.setEnabled(False)
-            self.summary.setText("已请求取消，等待当前 batch 完成")
+            self.summary.setText("已请求取消，等待当前 Batch 完成")
 
     def _progressed(self, done: int, total: int) -> None:
         self.progress.setValue(round(done * 100 / total) if total else 0)
@@ -2015,7 +2145,7 @@ class BatchInferenceWidget(QWidget):
                       f"{result.accuracy:.2%}", f"{result.elapsed_ms:.3f}")
             for column, value in enumerate(values):
                 self.result_table.setItem(row, column, QTableWidgetItem(str(value)))
-        self.result_table.resizeColumnsToContents()
+        self.result_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=3)
         chart_path = self._save_chart(outcome)
         target = self.chart_scroll.viewport().size()
         target.setWidth(max(640, target.width() - 12)); target.setHeight(320)
@@ -2144,7 +2274,7 @@ class ErrorAwareTrainingWidget(QWidget):
         self.error_model_edit.setReadOnly(require_workflow)
         error_row = QHBoxLayout()
         error_row.addWidget(self.error_model_edit)
-        error_button = QPushButton("Browse")
+        error_button = QPushButton("选择文件")
         error_button.clicked.connect(self._browse_error_model)
         error_button.setEnabled(not require_workflow)
         error_row.addWidget(error_button)
@@ -2152,7 +2282,7 @@ class ErrorAwareTrainingWidget(QWidget):
         self.dataset_edit = QLineEdit(str(data_root("mnist")))
         dataset_row = QHBoxLayout()
         dataset_row.addWidget(self.dataset_edit)
-        dataset_button = QPushButton("Browse")
+        dataset_button = QPushButton("选择目录")
         dataset_button.clicked.connect(self._browse_dataset)
         dataset_button.setEnabled(not require_workflow)
         dataset_row.addWidget(dataset_button)
@@ -2161,15 +2291,15 @@ class ErrorAwareTrainingWidget(QWidget):
         self.lambda_spin.setRange(0.0, 1.0)
         self.lambda_spin.setSingleStep(0.05)
         self.lambda_spin.setValue(1.0)
-        form.addRow("Error strength (lambda)", self.lambda_spin)
+        form.addRow("误差强度（lambda）", self.lambda_spin)
         self.epoch_spin = QSpinBox()
         self.epoch_spin.setRange(1, 100)
         self.epoch_spin.setValue(1)
-        form.addRow("Epochs", self.epoch_spin)
+        form.addRow("Epoch 数", self.epoch_spin)
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 4096)
         self.batch_spin.setValue(128)
-        form.addRow("Batch size", self.batch_spin)
+        form.addRow("Batch Size", self.batch_spin)
         self.learning_rate_spin = QDoubleSpinBox()
         self.learning_rate_spin.setDecimals(7)
         self.learning_rate_spin.setRange(0.0000001, 0.01)
@@ -2195,17 +2325,17 @@ class ErrorAwareTrainingWidget(QWidget):
         self.max_eval_batches_spin.setSpecialValueText("完整评估集")
         form.addRow("每种模式最大评估批数", self.max_eval_batches_spin)
         self.device_combo = QComboBox()
-        self.device_combo.addItems(["auto", "cuda", "cpu"])
-        form.addRow("Device", self.device_combo)
+        _setup_device_combo(self.device_combo)
+        form.addRow("运行设备", self.device_combo)
         self.output_edit = QLineEdit(str(
             platform_root / "outputs" / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "training"
         ))
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_edit)
-        output_button = QPushButton("Browse")
+        output_button = QPushButton("选择目录")
         output_button.clicked.connect(self._browse_output)
         output_row.addWidget(output_button)
-        form.addRow("Output directory", output_row)
+        form.addRow("输出目录", output_row)
         layout.addLayout(form)
         controls = QHBoxLayout()
         self.run_button = QPushButton("开始误差感知训练")
@@ -2224,16 +2354,18 @@ class ErrorAwareTrainingWidget(QWidget):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         layout.addWidget(self.progress)
-        self.summary = QLabel("Not run")
+        self.summary = QLabel("尚未运行")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
         self.metrics_table = QTableWidget(0, 5)
         self.metrics_table.setHorizontalHeaderLabels(
-            ["Stage", "Mode", "Accuracy / token accuracy", "Loss", "Perplexity"]
+            ["阶段", "模式", "Accuracy / Token Accuracy", "Loss", "Perplexity"]
         )
+        _fit_result_table_height(self.metrics_table, max_visible_rows=8)
         layout.addWidget(self.metrics_table)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMaximumHeight(160)
         layout.addWidget(self.log)
         if self.coordinator is not None:
             _fill_error_model_combo(self.error_model_combo, self.coordinator)
@@ -2285,7 +2417,7 @@ class ErrorAwareTrainingWidget(QWidget):
             self.dataset_edit.setText(str(corpus))
             self.checkpoint_edit.setText(str(values["checkpoint_path"]))
             self.auxiliary_edit.setText(str(values["auxiliary_path"] or ""))
-            self.device_combo.setCurrentText(str(values["device"]))
+            _select_device(self.device_combo, str(values["device"]))
             self.batch_spin.setValue(1)
             self.learning_rate_spin.setValue(0.00002)
             self.sequence_length_spin.setValue(64)
@@ -2313,7 +2445,7 @@ class ErrorAwareTrainingWidget(QWidget):
         self.dataset_edit.setText(str(values["dataset_root"]))
         self.checkpoint_edit.setText(str(values["checkpoint_path"]))
         self.auxiliary_edit.setText(str(values["auxiliary_path"] or ""))
-        self.device_combo.setCurrentText(str(values["device"]))
+        _select_device(self.device_combo, str(values["device"]))
         index = self.error_model_combo.findData(values["error_model_id"])
         if index >= 0:
             self.error_model_combo.blockSignals(True); self.error_model_combo.setCurrentIndex(index)
@@ -2330,18 +2462,18 @@ class ErrorAwareTrainingWidget(QWidget):
 
     def _browse_error_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select device error model", self.error_model_edit.text(), "JSON (*.json)"
+            self, "选择器件误差模型", self.error_model_edit.text(), "JSON (*.json)"
         )
         if path:
             self.error_model_edit.setText(path)
 
     def _browse_dataset(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select MNIST root", self.dataset_edit.text())
+        path = QFileDialog.getExistingDirectory(self, "选择 MNIST 数据集根目录", self.dataset_edit.text())
         if path:
             self.dataset_edit.setText(path)
 
     def _browse_output(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select output directory", self.output_edit.text())
+        path = QFileDialog.getExistingDirectory(self, "选择输出目录", self.output_edit.text())
         if path:
             self.output_edit.setText(path)
 
@@ -2351,7 +2483,7 @@ class ErrorAwareTrainingWidget(QWidget):
             error_model_path=Path(self.error_model_edit.text().strip()),
             output_dir=Path(output_dir) if output_dir else Path(self.output_edit.text().strip()),
             error_strength=self.lambda_spin.value(), epochs=self.epoch_spin.value(),
-            batch_size=self.batch_spin.value(), device=self.device_combo.currentText(),
+            batch_size=self.batch_spin.value(), device=_device_value(self.device_combo),
             dataset_root=Path(self.dataset_edit.text().strip()),
             model_id=self.model_edit.text().strip(),
             checkpoint_path=Path(self.checkpoint_edit.text().strip()),
@@ -2369,6 +2501,7 @@ class ErrorAwareTrainingWidget(QWidget):
             return
         self.last_outcome = None
         self.metrics_table.setRowCount(0)
+        _fit_result_table_height(self.metrics_table, max_visible_rows=8)
         self.progress.setValue(0)
         try:
             if self.require_workflow:
@@ -2379,7 +2512,7 @@ class ErrorAwareTrainingWidget(QWidget):
             request = self._request(output_dir)
             self.service.validate(request)
         except Exception as exc:
-            self.summary.setText("Training configuration error: " + str(exc).splitlines()[0])
+            self.summary.setText("训练配置错误：" + str(exc).splitlines()[0])
             self.log.appendPlainText(traceback.format_exc())
             self._restore_controls()
             return
@@ -2387,12 +2520,12 @@ class ErrorAwareTrainingWidget(QWidget):
         self.run_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.export_button.setEnabled(False)
-        self.summary.setText("Training in progress")
-        self.log.appendPlainText(f"Starting full training job: {request.output_dir}")
+        self.summary.setText("正在进行误差感知训练")
+        self.log.appendPlainText(f"开始完整训练任务：{request.output_dir}")
         if request.model_id == "tinytransformer-cifar10":
             self.log.appendPlainText(
-                "TinyTransformer fine-tuning: frozen backbone, trainable attention-pooling "
-                "and classifier heads; the frozen backbone uses float forward."
+                "TinyTransformer 微调：冻结骨干网络，仅训练注意力池化头和分类头；"
+                "冻结部分使用浮点前向计算。"
             )
         elif request.model_id == "gpt2-small":
             self.log.appendPlainText(
@@ -2410,8 +2543,8 @@ class ErrorAwareTrainingWidget(QWidget):
     def cancel_training(self) -> None:
         if self.worker is not None and self.worker.isRunning():
             self.cancel_button.setEnabled(False)
-            self.summary.setText("Cancellation requested; waiting for the current batch")
-            self.log.appendPlainText("Cancellation requested")
+            self.summary.setText("已请求取消，等待当前 Batch 完成")
+            self.log.appendPlainText("已请求取消")
             self.worker.request_cancel()
 
     def _training_progressed(self, percent: int, message: str, metrics: object) -> None:
@@ -2419,7 +2552,9 @@ class ErrorAwareTrainingWidget(QWidget):
         detail = ""
         if isinstance(metrics, dict) and "train_loss" in metrics:
             detail = f" | loss={metrics['train_loss']:.6f}, accuracy={metrics['train_accuracy']:.4f}"
-        self.log.appendPlainText(message + detail)
+        shown_message = _translate_runtime_message(message)
+        self.summary.setText(shown_message)
+        self.log.appendPlainText(shown_message + detail)
 
     def _training_succeeded(self, outcome: TrainingOutcome) -> None:
         self.last_outcome = outcome
@@ -2427,7 +2562,7 @@ class ErrorAwareTrainingWidget(QWidget):
         for stage in ("before", "after"):
             for mode, result in outcome.evaluations[stage].items():
                 rows.append((
-                    stage, mode, result["accuracy"], result["loss"],
+                    _stage_display_name(stage), _mode_display_name(mode), result["accuracy"], result["loss"],
                     result.get("perplexity", "-"),
                 ))
         self.metrics_table.setRowCount(len(rows))
@@ -2435,15 +2570,15 @@ class ErrorAwareTrainingWidget(QWidget):
             for column, value in enumerate(values):
                 shown = f"{value:.6f}" if isinstance(value, float) else str(value)
                 self.metrics_table.setItem(row, column, QTableWidgetItem(shown))
-        self.metrics_table.resizeColumnsToContents()
+        self.metrics_table.resizeColumnsToContents(); _fit_result_table_height(self.metrics_table, max_visible_rows=8)
         update = outcome.weight_update
         self.summary.setText(
-            f"Completed in {outcome.elapsed_seconds:.1f} s on {outcome.device}; "
-            f"weight L2 delta={update['l2_delta']:.6g}; result={outcome.result_path}"
+            f"训练完成：耗时 {outcome.elapsed_seconds:.1f} s，设备 {outcome.device}；"
+            f"权重 L2 变化量={update['l2_delta']:.6g}；结果={outcome.result_path}"
         )
-        self.log.appendPlainText("Checkpoint: " + outcome.checkpoint_path)
-        self.log.appendPlainText("History: " + outcome.history_path)
-        self.log.appendPlainText("Result: " + outcome.result_path)
+        self.log.appendPlainText("Checkpoint：" + outcome.checkpoint_path)
+        self.log.appendPlainText("训练历史：" + outcome.history_path)
+        self.log.appendPlainText("结果：" + outcome.result_path)
         self.progress.setValue(100)
         self.export_button.setEnabled(True)
         if self.coordinator is not None:
@@ -2451,7 +2586,7 @@ class ErrorAwareTrainingWidget(QWidget):
 
     def _training_failed(self, details: str) -> None:
         self.log.appendPlainText(details)
-        self.summary.setText("Training failed: " + details.splitlines()[-1])
+        self.summary.setText("训练失败：" + details.splitlines()[-1])
 
     def _training_cancelled(self, message: str) -> None:
         self.log.appendPlainText(message)
@@ -2473,13 +2608,13 @@ class ErrorAwareTrainingWidget(QWidget):
         if self.last_outcome is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export training result", "training_result.json", "JSON (*.json)"
+            self, "导出训练结果", "training_result.json", "JSON (*.json)"
         )
         if path:
             Path(path).write_text(
                 Path(self.last_outcome.result_path).read_text(encoding="utf-8"), encoding="utf-8"
             )
-            self.log.appendPlainText("Exported result: " + str(Path(path).resolve()))
+            self.log.appendPlainText("结果已导出：" + str(Path(path).resolve()))
 
 
 class PpaEvaluationWidget(QWidget):
@@ -2500,8 +2635,8 @@ class PpaEvaluationWidget(QWidget):
         platform_root = self.project_root / "5_NeuroCIM_opt"
         layout = QVBoxLayout(self)
         description = QLabel(
-            "Export signed differential traces and run the bundled official NeuroSim core. "
-            "Metrics are read from NeuroSim stdout; the selected error file is validated and recorded."
+            "导出正负差分跟踪数据并运行随软件提供的官方 NeuroSim 内核。"
+            "指标从 NeuroSim 标准输出中读取，同时校验并记录所选误差文件。"
         )
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -2509,13 +2644,13 @@ class PpaEvaluationWidget(QWidget):
         form = QFormLayout()
         self.model_combo = QComboBox()
         self.model_combo.addItem("LeNet-5 / MNIST", "lenet5-mnist")
-        form.addRow("Model", self.model_combo)
+        form.addRow("模型", self.model_combo)
         self.checkpoint_edit = QLineEdit(
             str(platform_root / "outputs" / "eat" / "01_NMOS" / "eat_checkpoint.pt")
         )
         checkpoint_row = QHBoxLayout()
         checkpoint_row.addWidget(self.checkpoint_edit)
-        checkpoint_button = QPushButton("Browse")
+        checkpoint_button = QPushButton("选择文件")
         checkpoint_button.clicked.connect(self._browse_checkpoint)
         checkpoint_row.addWidget(checkpoint_button)
         form.addRow("Checkpoint", checkpoint_row)
@@ -2526,29 +2661,30 @@ class PpaEvaluationWidget(QWidget):
         self.error_model_edit.setReadOnly(require_workflow)
         error_row = QHBoxLayout()
         error_row.addWidget(self.error_model_edit)
-        error_button = QPushButton("Browse")
+        error_button = QPushButton("选择文件")
         error_button.clicked.connect(self._browse_error_model)
         error_button.setEnabled(not require_workflow)
         error_row.addWidget(error_button)
-        form.addRow("Error model", error_row)
+        form.addRow("误差模型", error_row)
         self.subarray_rows = QSpinBox()
         self.subarray_rows.setRange(1, 4096)
         self.subarray_rows.setValue(128)
-        form.addRow("Subarray rows", self.subarray_rows)
+        form.addRow("子阵列行数", self.subarray_rows)
         self.parallel_rows = QSpinBox()
         self.parallel_rows.setRange(1, 4096)
         self.parallel_rows.setValue(128)
-        form.addRow("Parallel rows", self.parallel_rows)
+        form.addRow("并行行数", self.parallel_rows)
         layout.addLayout(form)
 
-        self.run_button = QPushButton("Run official NeuroSim PPA")
+        self.run_button = QPushButton("运行官方 NeuroSim PPA 评估")
         self.run_button.clicked.connect(self.start_evaluation)
         layout.addWidget(self.run_button)
-        self.summary = QLabel("Not run")
+        self.summary = QLabel("尚未运行")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
         self.result_table = QTableWidget(0, 2)
-        self.result_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.result_table.setHorizontalHeaderLabels(["指标", "数值"])
+        _fit_result_table_height(self.result_table, max_visible_rows=8)
         layout.addWidget(self.result_table)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -2587,13 +2723,13 @@ class PpaEvaluationWidget(QWidget):
         self._sync_ppa_error_path()
 
     def _browse_checkpoint(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select checkpoint", self.checkpoint_edit.text())
+        path, _ = QFileDialog.getOpenFileName(self, "选择 Checkpoint", self.checkpoint_edit.text())
         if path:
             self.checkpoint_edit.setText(path)
 
     def _browse_error_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select error model", self.error_model_edit.text(), "JSON (*.json)"
+            self, "选择误差模型", self.error_model_edit.text(), "JSON (*.json)"
         )
         if path:
             self.error_model_edit.setText(path)
@@ -2606,13 +2742,14 @@ class PpaEvaluationWidget(QWidget):
             return
         self.last_outcome = None
         self.result_table.setRowCount(0)
+        _fit_result_table_height(self.result_table, max_visible_rows=8)
         self.run_button.setEnabled(False)
         self.progress.setRange(0, 0)
         target = output_dir or (
             self.project_root / "5_NeuroCIM_opt" / "outputs" / "gui_runs"
             / datetime.now().strftime("%Y%m%d-%H%M%S") / "ppa"
         )
-        self.log.appendPlainText(f"Starting NeuroSim PPA: {target}")
+        self.log.appendPlainText(f"开始 NeuroSim PPA 评估：{target}")
         self.worker = PpaThread(
             self.service, self.project_root, Path(self.checkpoint_edit.text()),
             Path(self.error_model_edit.text()), Path(target), self.subarray_rows.value(),
@@ -2626,29 +2763,29 @@ class PpaEvaluationWidget(QWidget):
     def _ppa_succeeded(self, outcome: PpaOutcome) -> None:
         self.last_outcome = outcome
         display = [
-            ("Area", outcome.metrics.get("chip_area_um2"), "um^2"),
-            ("Latency", outcome.metrics.get("read_latency_ns"), "ns/image"),
-            ("Dynamic energy", outcome.metrics.get("read_dynamic_energy_pj"), "pJ/image"),
-            ("Energy efficiency", outcome.metrics.get("energy_efficiency_tops_per_w"), "TOPS/W"),
-            ("Throughput", outcome.metrics.get("throughput_fps"), "FPS"),
+            ("芯片面积", outcome.metrics.get("chip_area_um2"), "um^2"),
+            ("延迟", outcome.metrics.get("read_latency_ns"), "ns/图像"),
+            ("动态能耗", outcome.metrics.get("read_dynamic_energy_pj"), "pJ/图像"),
+            ("能效", outcome.metrics.get("energy_efficiency_tops_per_w"), "TOPS/W"),
+            ("吞吐率", outcome.metrics.get("throughput_fps"), "FPS"),
         ]
         self.result_table.setRowCount(len(display))
         for row, (name, value, unit) in enumerate(display):
-            shown = "unavailable" if value is None else f"{value:.6g} {unit}"
+            shown = "不可用" if value is None else f"{value:.6g} {unit}"
             self.result_table.setItem(row, 0, QTableWidgetItem(name))
             self.result_table.setItem(row, 1, QTableWidgetItem(shown))
-        self.result_table.resizeColumnsToContents()
+        self.result_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=8)
         self.summary.setText(
-            f"Completed with official NeuroSim. JSON: {outcome.result_path} | Log: {outcome.log_path}"
+            f"官方 NeuroSim 评估完成。JSON：{outcome.result_path}｜日志：{outcome.log_path}"
         )
-        self.log.appendPlainText(f"Trace directory: {outcome.trace_directory}")
-        self.log.appendPlainText(f"Trace input: {outcome.trace_input}")
-        self.log.appendPlainText(f"Result JSON: {outcome.result_path}")
-        self.log.appendPlainText(f"NeuroSim log: {outcome.log_path}")
+        self.log.appendPlainText(f"跟踪数据目录：{outcome.trace_directory}")
+        self.log.appendPlainText(f"跟踪输入：{outcome.trace_input}")
+        self.log.appendPlainText(f"结果 JSON：{outcome.result_path}")
+        self.log.appendPlainText(f"NeuroSim 日志：{outcome.log_path}")
 
     def _ppa_failed(self, details: str) -> None:
         self.log.appendPlainText(details)
-        self.summary.setText("PPA evaluation failed: " + details.splitlines()[-1])
+        self.summary.setText("PPA 评估失败：" + details.splitlines()[-1])
 
     def _ppa_finished(self) -> None:
         self.progress.setRange(0, 100)
@@ -2681,7 +2818,7 @@ class GPT2GenerationWidget(QWidget):
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
-        self.model_label = QLabel("GPT-2 Small / prompt_text")
+        self.model_label = QLabel("GPT-2 Small / 文本提示词")
         form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(model_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         form.addRow("GPT-2 Checkpoint", self.checkpoint_edit)
@@ -2693,11 +2830,11 @@ class GPT2GenerationWidget(QWidget):
         self.error_model_edit = QLineEdit(str(platform_root / "outputs/error_models/01_NMOS/error_model.json"))
         self.error_model_edit.setReadOnly(require_workflow); form.addRow("误差模型文件", self.error_model_edit)
         self.max_tokens = QSpinBox(); self.max_tokens.setRange(1, 128); self.max_tokens.setValue(24)
-        form.addRow("生成 token 数", self.max_tokens)
+        form.addRow("生成 Token 数", self.max_tokens)
         self.lambda_spin = QDoubleSpinBox(); self.lambda_spin.setRange(0.0, 1.0)
         self.lambda_spin.setSingleStep(0.05); self.lambda_spin.setValue(1.0)
         form.addRow("误差强度 lambda", self.lambda_spin)
-        self.device_combo = QComboBox(); self.device_combo.addItems(["auto", "cuda", "cpu"])
+        self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
         form.addRow("运行设备", self.device_combo)
         layout.addLayout(form)
 
@@ -2718,12 +2855,14 @@ class GPT2GenerationWidget(QWidget):
         self.summary = QLabel("尚未运行"); self.summary.setWordWrap(True); layout.addWidget(self.summary)
 
         self.result_table = QTableWidget(0, 4)
-        self.result_table.setHorizontalHeaderLabels(["模式", "生成 token", "耗时 (ms)", "token/s"])
+        self.result_table.setHorizontalHeaderLabels(["模式", "生成 Token", "耗时 (ms)", "Token/s"])
+        _fit_result_table_height(self.result_table, max_visible_rows=3)
         layout.addWidget(self.result_table)
         self.output_text = QPlainTextEdit(); self.output_text.setReadOnly(True); self.output_text.setMinimumHeight(240)
         layout.addWidget(self.output_text)
         self.top5_table = QTableWidget(0, 4)
-        self.top5_table.setHorizontalHeaderLabels(["模式", "排名", "最后一步候选 token", "置信度"])
+        self.top5_table.setHorizontalHeaderLabels(["模式", "排名", "最后一步候选 Token", "置信度"])
+        _fit_result_table_height(self.top5_table, max_visible_rows=8)
         layout.addWidget(self.top5_table)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(120)
         layout.addWidget(self.log)
@@ -2786,7 +2925,7 @@ class GPT2GenerationWidget(QWidget):
             input_scales_path=Path(self.scales_edit.text()),
             error_model_path=Path(self.error_model_edit.text()),
             max_new_tokens=self.max_tokens.value(), error_strength=self.lambda_spin.value(),
-            device=self.device_combo.currentText(), model_variant=self.model_variant,
+            device=_device_value(self.device_combo), model_variant=self.model_variant,
         )
 
     def start_generation(self) -> None:
@@ -2802,8 +2941,9 @@ class GPT2GenerationWidget(QWidget):
             self.summary.setText("GPT-2 配置错误：" + str(exc).splitlines()[0]); return
         self.last_outcome = None; self.output_text.clear(); self.result_table.setRowCount(0)
         self.top5_table.setRowCount(0); self.progress.setValue(0)
+        _fit_result_table_height(self.result_table, max_visible_rows=3); _fit_result_table_height(self.top5_table, max_visible_rows=8)
         self.run_button.setEnabled(False); self.cancel_button.setEnabled(True)
-        self.summary.setText("GPT-2 三模式生成运行中")
+        self.summary.setText("正在运行 GPT-2 三模式生成")
         self.worker = GPT2GenerationThread(self.service, request)
         self.worker.progressed.connect(self._progressed); self.worker.succeeded.connect(self._succeeded)
         self.worker.failed.connect(self._failed); self.worker.cancelled.connect(self._cancelled)
@@ -2814,7 +2954,7 @@ class GPT2GenerationWidget(QWidget):
             self.worker.request_cancel(); self.cancel_button.setEnabled(False)
 
     def _progressed(self, percent: int, message: str) -> None:
-        self.progress.setValue(percent); self.summary.setText(message)
+        self.progress.setValue(percent); self.summary.setText(_translate_runtime_message(message))
 
     def _succeeded(self, outcome: GPT2GenerationOutcome) -> None:
         self.last_outcome = outcome
@@ -2823,23 +2963,24 @@ class GPT2GenerationWidget(QWidget):
         self.top5_table.setRowCount(top_rows)
         top_row = 0; sections = []
         for row, mode in enumerate(outcome.modes):
-            values = (mode.mode, len(mode.generated_token_ids), f"{mode.elapsed_ms:.2f}",
+            shown_mode = _mode_display_name(mode.mode)
+            values = (shown_mode, len(mode.generated_token_ids), f"{mode.elapsed_ms:.2f}",
                       f"{mode.tokens_per_second:.2f}")
             for column, value in enumerate(values):
                 self.result_table.setItem(row, column, QTableWidgetItem(str(value)))
-            sections.append(f"[{mode.mode}]\n{mode.text}")
+            sections.append(f"【{shown_mode}】\n{mode.text}")
             for rank, (token, confidence) in enumerate(mode.final_top5, 1):
-                for column, value in enumerate((mode.mode, rank, repr(token), f"{confidence:.2%}")):
+                for column, value in enumerate((shown_mode, rank, repr(token), f"{confidence:.2%}")):
                     self.top5_table.setItem(top_row, column, QTableWidgetItem(str(value)))
                 top_row += 1
         self.output_text.setPlainText("\n\n".join(sections))
-        self.result_table.resizeColumnsToContents(); self.top5_table.resizeColumnsToContents()
+        self.result_table.resizeColumnsToContents(); self.top5_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=3); _fit_result_table_height(self.top5_table, max_visible_rows=8)
         output = self.project_root / "5_NeuroCIM_opt/outputs/gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "gpt2"
         output.mkdir(parents=True, exist_ok=True)
         result_path = output / "generation_result.json"
         result_path.write_text(json.dumps(outcome.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         self.summary.setText(
-            f"完成：提示词 {outcome.prompt_token_count} tokens，三模式总耗时 {outcome.total_elapsed_ms:.1f} ms"
+            f"完成：提示词包含 {outcome.prompt_token_count} 个 Token，三模式总耗时 {outcome.total_elapsed_ms:.1f} ms"
         )
         self.log.appendPlainText(f"结果：{result_path}")
         if self.coordinator is not None and self.error_model_combo.currentData():
@@ -2858,7 +2999,7 @@ class GPT2GenerationWidget(QWidget):
         self.summary.setText("GPT-2 生成失败"); self.log.appendPlainText(trace)
 
     def _cancelled(self, message: str) -> None:
-        self.summary.setText(message); self.log.appendPlainText(message)
+        shown = _translate_runtime_message(message); self.summary.setText(shown); self.log.appendPlainText(shown)
 
     def _finished(self) -> None:
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
@@ -2882,11 +3023,11 @@ class GPT2BatchInferenceWidget(QWidget):
         platform_root = self.project_root / "5_NeuroCIM_opt"
         layout = QVBoxLayout(self)
         description = QLabel(
-            "对多条提示词执行浮点、理想差分和器件误差差分生成，统计器件输出相对浮点输出的 token 一致率。"
+            "对多条提示词执行浮点、理想差分和器件误差差分生成，统计器件输出相对浮点输出的 Token 一致率。"
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
-        self.model_label = QLabel("GPT-2 Small / prompt_text")
+        self.model_label = QLabel("GPT-2 Small / 文本提示词")
         form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(checkpoint_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         self.tokenizer_edit = QLineEdit(str(checkpoint_root / "tokenizer")); self.tokenizer_edit.setReadOnly(True)
@@ -2897,11 +3038,11 @@ class GPT2BatchInferenceWidget(QWidget):
         self.error_model_edit = QLineEdit(str(platform_root / "outputs/error_models/01_NMOS/error_model.json"))
         self.error_model_edit.setReadOnly(require_workflow); form.addRow("误差模型", self.error_model_edit)
         self.max_tokens = QSpinBox(); self.max_tokens.setRange(1, 64); self.max_tokens.setValue(8)
-        form.addRow("每条生成 token 数", self.max_tokens)
+        form.addRow("每条生成 Token 数", self.max_tokens)
         self.lambda_spin = QDoubleSpinBox(); self.lambda_spin.setRange(0.0, 1.0)
         self.lambda_spin.setSingleStep(0.05); self.lambda_spin.setValue(1.0)
         form.addRow("误差强度 lambda", self.lambda_spin)
-        self.device_combo = QComboBox(); self.device_combo.addItems(["auto", "cuda", "cpu"])
+        self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
         form.addRow("运行设备", self.device_combo); layout.addLayout(form)
         self.prompts_edit = QPlainTextEdit()
         self.prompts_edit.setPlainText(
@@ -2921,6 +3062,7 @@ class GPT2BatchInferenceWidget(QWidget):
         self.result_table.setHorizontalHeaderLabels(
             ["提示词", "浮点生成", "器件误差生成", "Token 一致率", "三模式总耗时 (ms)"]
         )
+        _fit_result_table_height(self.result_table, max_visible_rows=6)
         layout.addWidget(self.result_table)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100)
         layout.addWidget(self.log)
@@ -2992,7 +3134,7 @@ class GPT2BatchInferenceWidget(QWidget):
             input_scales_path=Path(self.scales_edit.text()),
             error_model_path=Path(self.error_model_edit.text()),
             max_new_tokens=self.max_tokens.value(), error_strength=self.lambda_spin.value(),
-            device=self.device_combo.currentText(), model_variant=self.model_variant,
+            device=_device_value(self.device_combo), model_variant=self.model_variant,
         ) for prompt in prompts)
 
     def start_inference(self) -> None:
@@ -3004,11 +3146,11 @@ class GPT2BatchInferenceWidget(QWidget):
             for request in requests: self.service.validate(request)
         except Exception as exc:
             self.summary.setText("批量推理配置错误：" + str(exc).splitlines()[0]); return
-        self.result_table.setRowCount(0); self.progress.setValue(0)
+        self.result_table.setRowCount(0); self.progress.setValue(0); _fit_result_table_height(self.result_table, max_visible_rows=6)
         self.run_button.setEnabled(False); self.cancel_button.setEnabled(True)
         self.summary.setText(f"正在处理 {len(requests)} 条提示词")
         self.worker = GPT2BatchThread(self.service, requests)
-        self.worker.progressed.connect(lambda percent, message: (self.progress.setValue(percent), self.summary.setText(message)))
+        self.worker.progressed.connect(lambda percent, message: (self.progress.setValue(percent), self.summary.setText(_translate_runtime_message(message))))
         self.worker.succeeded.connect(self._succeeded); self.worker.failed.connect(self._failed)
         self.worker.cancelled.connect(self._cancelled); self.worker.finished.connect(self._finished)
         self.worker.start()
@@ -3035,7 +3177,7 @@ class GPT2BatchInferenceWidget(QWidget):
             for column, value in enumerate(values):
                 self.result_table.setItem(row, column, QTableWidgetItem(str(value)))
             payload.append(outcome.as_dict())
-        self.result_table.resizeColumnsToContents()
+        self.result_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=6)
         average = sum(agreements) / len(agreements)
         output = self.project_root / "5_NeuroCIM_opt/outputs/gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "gpt2_batch"
         output.mkdir(parents=True, exist_ok=True); result_path = output / "batch_result.json"
@@ -3059,7 +3201,7 @@ class GPT2BatchInferenceWidget(QWidget):
         self.summary.setText("GPT-2 批量推理失败"); self.log.appendPlainText(trace)
 
     def _cancelled(self, message: str) -> None:
-        self.summary.setText(message); self.log.appendPlainText(message)
+        shown = _translate_runtime_message(message); self.summary.setText(shown); self.log.appendPlainText(shown)
 
     def _finished(self) -> None:
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
@@ -3088,8 +3230,8 @@ class WikiText2EvaluationWidget(QWidget):
         group = QGroupBox("WikiText-2 语言模型评估（浮点基线）")
         group_layout = QVBoxLayout(group)
         note = QLabel(
-            "使用离线 WikiText-2 raw-v1 计算滑窗负对数似然和困惑度。"
-            "批大小固定为 1；每个目标 token 只计入一次。"
+            "使用离线 WikiText-2 原始数据 v1 计算滑窗负对数似然和困惑度。"
+            "Batch Size 固定为 1；每个目标 Token 只计入一次。"
         )
         note.setWordWrap(True); group_layout.addWidget(note)
         form = QFormLayout()
@@ -3100,8 +3242,10 @@ class WikiText2EvaluationWidget(QWidget):
         self.tokenizer_edit = QLineEdit(str(resource_root))
         self.tokenizer_edit.setReadOnly(True); form.addRow("分词器", self.tokenizer_edit)
         self.dataset_edit = QLineEdit(str(resource_root / "wikitext-2-raw-v1"))
-        self.dataset_edit.setReadOnly(True); form.addRow("WikiText-2 raw", self.dataset_edit)
-        self.split_combo = QComboBox(); self.split_combo.addItems(["test", "validation", "train"])
+        self.dataset_edit.setReadOnly(True); form.addRow("WikiText-2 原始数据", self.dataset_edit)
+        self.split_combo = QComboBox()
+        for shown, value in (("测试集", "test"), ("验证集", "validation"), ("训练集", "train")):
+            self.split_combo.addItem(shown, value)
         form.addRow("数据切分", self.split_combo)
         self.context_spin = QSpinBox(); self.context_spin.setRange(2, 1024); self.context_spin.setValue(1024)
         form.addRow("上下文长度", self.context_spin)
@@ -3109,8 +3253,8 @@ class WikiText2EvaluationWidget(QWidget):
         form.addRow("滑窗步长", self.stride_spin)
         self.max_tokens_spin = QSpinBox(); self.max_tokens_spin.setRange(0, 10_000_000)
         self.max_tokens_spin.setValue(4096); self.max_tokens_spin.setSpecialValueText("完整语料")
-        form.addRow("最多评估 token", self.max_tokens_spin)
-        self.device_combo = QComboBox(); self.device_combo.addItems(["auto", "cuda", "cpu"])
+        form.addRow("最多评估 Token", self.max_tokens_spin)
+        self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
         form.addRow("运行设备", self.device_combo)
         group_layout.addLayout(form)
         controls = QHBoxLayout()
@@ -3124,7 +3268,7 @@ class WikiText2EvaluationWidget(QWidget):
         self.summary = QLabel("尚未运行"); self.summary.setWordWrap(True); group_layout.addWidget(self.summary)
         self.result_table = QTableWidget(0, 2)
         self.result_table.setHorizontalHeaderLabels(["指标", "结果"])
-        self.result_table.setMaximumHeight(260); group_layout.addWidget(self.result_table)
+        _fit_result_table_height(self.result_table, max_visible_rows=7); group_layout.addWidget(self.result_table)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100)
         group_layout.addWidget(self.log)
         layout.addWidget(group)
@@ -3142,14 +3286,14 @@ class WikiText2EvaluationWidget(QWidget):
         self.dataset_edit.setText(str(spec.dataset_root))
 
     def _request(self) -> WikiText2EvaluationRequest:
-        split = self.split_combo.currentText()
+        split = str(self.split_combo.currentData())
         maximum = self.max_tokens_spin.value()
         return WikiText2EvaluationRequest(
             project_root=self.project_root, model_variant=self.model_variant,
             checkpoint_path=Path(self.checkpoint_edit.text()),
             tokenizer_path=Path(self.tokenizer_edit.text()),
             dataset_path=Path(self.dataset_edit.text()), split=split,
-            device=self.device_combo.currentText(), stride=self.stride_spin.value(),
+            device=_device_value(self.device_combo), stride=self.stride_spin.value(),
             context_length=self.context_spin.value(), batch_size=1,
             max_eval_tokens=maximum or None,
             expected_dataset_sha256=self.DATASET_SHA256[split],
@@ -3162,7 +3306,7 @@ class WikiText2EvaluationWidget(QWidget):
         if request.stride >= request.context_length:
             self.summary.setText("滑窗步长必须小于上下文长度")
             return
-        self.last_outcome = None; self.result_table.setRowCount(0); self.progress.setValue(0)
+        self.last_outcome = None; self.result_table.setRowCount(0); self.progress.setValue(0); _fit_result_table_height(self.result_table, max_visible_rows=7)
         self.run_button.setEnabled(False); self.cancel_button.setEnabled(True)
         self.summary.setText("正在评估 WikiText-2……")
         self.worker = WikiText2EvaluationThread(self.service, request)
@@ -3178,7 +3322,7 @@ class WikiText2EvaluationWidget(QWidget):
             self.worker.request_cancel(); self.cancel_button.setEnabled(False)
 
     def _progressed(self, percent: int, message: str) -> None:
-        self.progress.setValue(percent); self.summary.setText(message)
+        self.progress.setValue(percent); self.summary.setText(_translate_runtime_message(message))
 
     def _succeeded(self, outcome: WikiText2EvaluationOutcome) -> None:
         self.last_outcome = outcome
@@ -3196,7 +3340,7 @@ class WikiText2EvaluationWidget(QWidget):
         for row, (name, value) in enumerate(values):
             self.result_table.setItem(row, 0, QTableWidgetItem(name))
             self.result_table.setItem(row, 1, QTableWidgetItem(value))
-        self.result_table.resizeColumnsToContents()
+        self.result_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=7)
         output = (self.project_root / "5_NeuroCIM_opt/outputs/gui_runs"
                   / datetime.now().strftime("%Y%m%d-%H%M%S") / "wikitext2")
         output.mkdir(parents=True, exist_ok=True)
@@ -3206,7 +3350,7 @@ class WikiText2EvaluationWidget(QWidget):
         )
         self.summary.setText(
             f"完成：loss={outcome.loss:.6f}，perplexity={outcome.perplexity:.6f}，"
-            f"tokens={outcome.predicted_token_count}"
+            f"Token 数={outcome.predicted_token_count}"
         )
         self.log.appendPlainText(f"结果：{result_path}")
 
@@ -3214,7 +3358,7 @@ class WikiText2EvaluationWidget(QWidget):
         self.summary.setText("WikiText-2 评估失败"); self.log.appendPlainText(trace)
 
     def _cancelled(self, message: str) -> None:
-        self.summary.setText(message); self.log.appendPlainText(message)
+        shown = _translate_runtime_message(message); self.summary.setText(shown); self.log.appendPlainText(shown)
 
     def _finished(self) -> None:
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
@@ -3297,6 +3441,12 @@ class UnifiedBatchInferenceWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
+    NAVIGATION = (
+        ("01", "首页"), ("02", "器件误差建模"), ("03", "阵列 MAC 分析"),
+        ("04", "模型与数据集"), ("05", "单样本推理"), ("06", "批量推理"),
+        ("07", "误差感知训练"),
+    )
+
     def __init__(self, platform_root: Path):
         super().__init__()
         self.platform_root = Path(platform_root).resolve()
@@ -3308,13 +3458,13 @@ class MainWindow(QMainWindow):
             configure_windows_font(application)
             apply_application_style(application)
         self.setWindowTitle(f"DRAM 存算仿真平台 — NeuroSim  v{__version__}")
-        self.setMinimumSize(720, 420)
+        self.setMinimumSize(960, 600)
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
-            self.resize(min(1180, int(available.width() * 0.92)), min(780, int(available.height() * 0.88)))
+            self.resize(min(1440, int(available.width() * 0.94)), min(900, int(available.height() * 0.90)))
         else:
-            self.resize(1180, 780)
+            self.resize(1366, 820)
 
         self.workflow = WorkflowCoordinator(platform_root)
         self.tabs = QTabWidget(self)
@@ -3325,31 +3475,29 @@ class MainWindow(QMainWindow):
         self.analysis_tabs.setObjectName("analysisTabs")
         self.analysis_tabs.setDocumentMode(True)
         self.analysis_tabs.addTab(
-            self._scrollable(CellFittingWidget(platform_root, coordinator=self.workflow)),
+            self._scrollable(CellFittingWidget(platform_root, coordinator=self.workflow), "器件误差建模", "导入器件测量 CSV，检查列映射并生成可供推理和训练选择的多种误差模型。"),
             "器件误差拟合",
         )
-        self.analysis_tabs.addTab(self._scrollable(MacAnalysisWidget(platform_root)), "阵列 MAC 分析")
+        self.analysis_tabs.addTab(self._scrollable(MacAnalysisWidget(platform_root), "阵列 MAC 分析", "拟合并分析不同阵列规模、位宽和实验组下的 MAC 输出误差。"), "阵列 MAC 分析")
+        self.analysis_tabs.tabBar().hide()
         self.tabs.addTab(self.analysis_tabs, "误差建模与阵列分析")
         self.tabs.addTab(
-            self._scrollable(ModelCatalogWidget(platform_root.parent, coordinator=self.workflow)),
+            self._scrollable(ModelCatalogWidget(platform_root.parent, coordinator=self.workflow), "模型与数据集", "统一选择后续单样本推理、批量推理和误差感知训练使用的模型数据集组合。"),
             "网络与数据集",
         )
         self.tabs.addTab(
-            self._scrollable(UnifiedSingleInferenceWidget(
-                platform_root.parent, coordinator=self.workflow, require_workflow=True
-            )), "单样本推理"
+            self._scrollable(UnifiedSingleInferenceWidget(platform_root.parent, coordinator=self.workflow, require_workflow=True), "单样本带误差推理", "对同一样本比较浮点、理想差分和器件误差差分结果；文本模型显示生成结果。"), "单样本推理"
         )
         self.tabs.addTab(
-            self._scrollable(UnifiedBatchInferenceWidget(
-                platform_root.parent, coordinator=self.workflow, require_workflow=True
-            )), "批量推理"
+            self._scrollable(UnifiedBatchInferenceWidget(platform_root.parent, coordinator=self.workflow, require_workflow=True), "批量带误差推理", "按样本分组汇总 Accuracy 或语言模型指标，比较三种计算模式。"), "批量推理"
         )
         self.tabs.addTab(
-            self._scrollable(ErrorAwareTrainingWidget(
-                platform_root.parent, coordinator=self.workflow, require_workflow=True
-            )), "误差感知训练"
+            self._scrollable(ErrorAwareTrainingWidget(platform_root.parent, coordinator=self.workflow, require_workflow=True), "误差感知训练", "继承已选择的网络、数据集和器件误差模型，执行可恢复的误差感知微调。"), "误差感知训练"
         )
-        self.setCentralWidget(self.tabs)
+        self.tabs.tabBar().hide()
+        self.shell_stack = QStackedWidget(); self.home_page = self._build_home_page()
+        self.shell_stack.addWidget(self.home_page); self.shell_stack.addWidget(self.tabs)
+        self.setCentralWidget(self._build_navigation_shell())
         self.statusBar().showMessage("就绪")
         help_menu = self.menuBar().addMenu("帮助")
         update_action = QAction("检查更新", self)
@@ -3359,9 +3507,102 @@ class MainWindow(QMainWindow):
         version_action = QAction(f"当前版本：{__version__}", self)
         version_action.setEnabled(False)
         help_menu.addAction(version_action)
+        self.menuBar().hide()
         self._apply_visual_roles()
+        self.workflow.models_changed.connect(self._refresh_home_summary)
+        self.workflow.selection_changed.connect(lambda _value: self._refresh_home_summary())
+        self.workflow.network_changed.connect(lambda _value: self._refresh_home_summary())
+        self._show_navigation_page(0); self._refresh_home_summary()
         if CredentialStore.load():
             QTimer.singleShot(5000, lambda: self._check_for_updates(interactive=False))
+
+    def _build_navigation_shell(self) -> QWidget:
+        root = QWidget(); outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        top = QFrame(); top.setObjectName("topBar"); top.setFixedHeight(68)
+        top_layout = QHBoxLayout(top); top_layout.setContentsMargins(22, 8, 22, 8); top_layout.setSpacing(12)
+        mark = QLabel("D"); mark.setObjectName("brandMark"); mark.setAlignment(Qt.AlignmentFlag.AlignCenter); top_layout.addWidget(mark)
+        brand = QVBoxLayout(); brand.setSpacing(1)
+        title = QLabel("DRAM 存算仿真平台"); title.setObjectName("brandTitle")
+        subtitle = QLabel("NeuroCIM 器件感知 AI 仿真平台"); subtitle.setObjectName("brandSubtitle")
+        brand.addWidget(title); brand.addWidget(subtitle); top_layout.addLayout(brand); top_layout.addStretch()
+        device = "GPU 可用" if self._cuda_available() else "CPU 模式"
+        runtime = QLabel(f"●  {device}  ·  v{__version__}"); runtime.setObjectName("topStatus"); top_layout.addWidget(runtime)
+        output_button = QPushButton("运行记录"); output_button.setProperty("topTool", True); output_button.clicked.connect(self._open_run_records); top_layout.addWidget(output_button)
+        help_button = QPushButton("帮助"); help_button.setProperty("topTool", True); help_button.clicked.connect(self._show_help); top_layout.addWidget(help_button)
+        update_button = QPushButton("检查更新"); update_button.setProperty("topTool", True); update_button.clicked.connect(lambda: self._check_for_updates(interactive=True)); top_layout.addWidget(update_button)
+        outer.addWidget(top)
+        body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0)
+        side = QFrame(); side.setObjectName("sideBar"); side.setFixedWidth(226)
+        side_layout = QVBoxLayout(side); side_layout.setContentsMargins(14, 18, 14, 14); side_layout.setSpacing(5)
+        caption = QLabel("功能导航"); caption.setObjectName("navCaption"); side_layout.addWidget(caption)
+        group = QButtonGroup(self); group.setExclusive(True); self.navigation_buttons = []
+        for index, (number, text) in enumerate(self.NAVIGATION):
+            button = QPushButton(f"  {number}    {text}"); button.setProperty("nav", True); button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, value=index: self._show_navigation_page(value))
+            group.addButton(button); side_layout.addWidget(button); self.navigation_buttons.append(button)
+        side_layout.addStretch()
+        status = QFrame(); status.setObjectName("sideStatus"); status_layout = QVBoxLayout(status); status_layout.setContentsMargins(12, 10, 12, 10); status_layout.setSpacing(4)
+        ready = QLabel("●  系统资源状态"); ready.setStyleSheet("color:#13825F;font-weight:700")
+        self.sidebar_summary = QLabel(); self.sidebar_summary.setProperty("muted", True); self.sidebar_summary.setWordWrap(True)
+        status_layout.addWidget(ready); status_layout.addWidget(self.sidebar_summary); side_layout.addWidget(status)
+        body.addWidget(side); body.addWidget(self.shell_stack, 1); outer.addLayout(body, 1); return root
+
+    def _build_home_page(self) -> QWidget:
+        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(28, 24, 28, 28); layout.setSpacing(16)
+        title = QLabel("功能总览"); title.setObjectName("homeTitle"); layout.addWidget(title)
+        subtitle = QLabel("集中查看当前实验配置，并按误差建模、模型选择、推理和训练流程继续工作。"); subtitle.setProperty("muted", True); subtitle.setWordWrap(True); layout.addWidget(subtitle)
+        hero = QFrame(); hero.setProperty("dashboardCard", True); hero_layout = QGridLayout(hero); hero_layout.setContentsMargins(20, 18, 20, 18); hero_layout.setSpacing(12)
+        heading = QLabel("当前实验工作区"); heading.setStyleSheet("font-weight:700;color:#26364D")
+        self.home_experiment = QLabel(); self.home_experiment.setObjectName("homeHero"); self.home_experiment.setWordWrap(True)
+        self.home_hint = QLabel(); self.home_hint.setProperty("muted", True); self.home_hint.setWordWrap(True)
+        continue_button = QPushButton("继续当前实验  →"); continue_button.setProperty("role", "primary"); continue_button.clicked.connect(lambda: self._show_navigation_page(4))
+        hero_layout.addWidget(heading, 0, 0, 1, 2); hero_layout.addWidget(self.home_experiment, 1, 0, 1, 2); hero_layout.addWidget(self.home_hint, 2, 0); hero_layout.addWidget(continue_button, 2, 1); hero_layout.setColumnStretch(0, 1); layout.addWidget(hero)
+        grid = QGridLayout(); grid.setSpacing(16)
+        entries = (("器件误差建模", "导入 CSV、映射测量列并生成原始、低阶和高阶误差 LUT。", 1), ("模型与数据集", "统一选择后续单样本推理、批量推理与训练使用的组合。", 3), ("带误差推理", "比较浮点、理想差分和器件误差差分的预测结果。", 4), ("误差感知训练", "使用器件 LUT 前向与 STE 反向微调，并比较训练前后指标。", 6))
+        for index, (name, description, target) in enumerate(entries):
+            card = QFrame(); card.setProperty("dashboardCard", True); card.setMinimumHeight(155); card_layout = QVBoxLayout(card); card_layout.setContentsMargins(18, 16, 18, 14); card_layout.setSpacing(8)
+            name_label = QLabel(name); name_label.setStyleSheet("font-size:14px;font-weight:700;color:#26364D")
+            detail = QLabel(description); detail.setProperty("muted", True); detail.setWordWrap(True)
+            button = QPushButton("进入模块  →"); button.setProperty("role", "primary"); button.clicked.connect(lambda _checked=False, value=target: self._show_navigation_page(value))
+            card_layout.addWidget(name_label); card_layout.addWidget(detail); card_layout.addStretch(); card_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignRight); grid.addWidget(card, index // 2, index % 2)
+        layout.addLayout(grid); layout.addStretch(); return page
+
+    @staticmethod
+    def _cuda_available() -> bool:
+        try:
+            import torch
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
+
+    def _show_navigation_page(self, index: int) -> None:
+        if not hasattr(self, "navigation_buttons"): return
+        index = max(0, min(index, len(self.navigation_buttons) - 1)); self.navigation_buttons[index].setChecked(True)
+        if index == 0: self.shell_stack.setCurrentIndex(0)
+        else:
+            self.shell_stack.setCurrentIndex(1)
+            if index in (1, 2): self.tabs.setCurrentIndex(0); self.analysis_tabs.setCurrentIndex(index - 1)
+            else: self.tabs.setCurrentIndex(index - 2)
+
+    def _refresh_home_summary(self) -> None:
+        try:
+            spec = self.workflow.model_registry.get(self.workflow.selected_network_model_id()); network = f"{spec.display_name} / {', '.join(spec.datasets)}"
+        except Exception: network = "尚未选择网络与数据集"
+        selected = self.workflow.selected_error_model_id()
+        if selected:
+            try:
+                model = self.workflow.registry.resolve(selected); error_name = str(model.get("name") or model.get("method") or selected)
+            except Exception: error_name = selected
+        else: error_name = "尚未完成误差建模"
+        self.home_experiment.setText(f"{error_name}  ×  {network}"); self.home_hint.setText("此配置会自动传递到单样本推理、批量推理与误差感知训练。")
+        self.sidebar_summary.setText(f"{len(self.workflow.model_registry.list())} 个网络配置\n{len(self.workflow.models())} 个可选误差模型")
+
+    def _open_run_records(self) -> None:
+        from PySide6.QtCore import QUrl
+        target = self.platform_root / "outputs"; target.mkdir(parents=True, exist_ok=True); QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    def _show_help(self) -> None:
+        QMessageBox.information(self, "使用帮助", "建议流程：先完成器件误差建模，再选择网络与数据集，随后运行单样本或批量推理，最后执行误差感知训练。")
 
     def _check_for_updates(self, *, interactive: bool) -> None:
         if self.update_check_thread is not None and self.update_check_thread.isRunning():
@@ -3481,21 +3722,28 @@ class MainWindow(QMainWindow):
             table.horizontalHeader().setStretchLastSection(True)
 
     @staticmethod
-    def _scrollable(page: QWidget) -> QScrollArea:
+    def _scrollable(page: QWidget, title: str | None = None, subtitle: str | None = None) -> QScrollArea:
         """Keep every page usable when the Windows taskbar reduces available height."""
         scroll = QScrollArea()
         scroll.setObjectName("pageScroll")
         page.setObjectName("pageContent")
         if page.layout() is not None:
-            page.layout().setContentsMargins(18, 16, 18, 20)
+            page.layout().setContentsMargins(0, 0, 0, 0)
             page.layout().setSpacing(10)
+        content = QWidget(); content.setObjectName("pageContent"); content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(26, 20, 26, 24); content_layout.setSpacing(12)
+        if title:
+            heading = QLabel(title); heading.setObjectName("contentTitle"); content_layout.addWidget(heading)
+        if subtitle:
+            detail = QLabel(subtitle); detail.setObjectName("contentSubtitle"); detail.setWordWrap(True); content_layout.addWidget(detail)
+        content_layout.addWidget(page)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.verticalScrollBar().setSingleStep(24)
         scroll.horizontalScrollBar().setSingleStep(24)
-        scroll.setWidget(page)
+        scroll.setWidget(content)
         return scroll
 
 
@@ -3510,7 +3758,7 @@ class ModelCatalogWidget(QWidget):
         layout = QVBoxLayout(self)
         explanation = QLabel(
             "在这里勾选一个模型与数据集组合。单样本推理、批量推理和后续训练将统一继承该选择；"
-            "后续页面不再单独切换网络。没有 checkpoint 的组合不能勾选。"
+            "后续页面不再单独切换网络。缺少 Checkpoint 的组合不能勾选。"
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
@@ -3532,7 +3780,7 @@ class ModelCatalogWidget(QWidget):
             selector.clicked.connect(lambda checked, model_id=spec.model_id:
                                      self._select_model(model_id) if checked else None)
             values = [
-                spec.model_id, spec.display_name, spec.task, ", ".join(spec.datasets),
+                spec.model_id, spec.display_name, _task_display_name(spec.task), ", ".join(spec.datasets),
                 "×".join(map(str, spec.input_shape)), ", ".join(spec.metrics),
                 "可用" if spec.resources_available else "未安装",
             ]
@@ -3553,7 +3801,7 @@ class ModelCatalogWidget(QWidget):
                 self._sync_selection(coordinator.selected_network_model_id())
             else:
                 self.selection_status.setText(
-                    "尚未安装可用的模型 checkpoint。请按发布包中的《外部资源配置说明》"
+                    "尚未安装可用的模型 Checkpoint。请按发布包中的《外部资源配置说明》"
                     "放置模型文件，然后重新启动软件。"
                 )
 
@@ -3577,7 +3825,7 @@ class ModelCatalogWidget(QWidget):
         spec = next(item for item in self.specs if item.model_id == model_id)
         dataset = ", ".join(spec.datasets)
         self.selection_status.setText(
-            f"当前统一配置：{spec.display_name}　|　数据集：{dataset}　|　任务：{spec.task}"
+            f"当前统一配置：{spec.display_name}　|　数据集：{dataset}　|　任务：{_task_display_name(spec.task)}"
         )
 
 

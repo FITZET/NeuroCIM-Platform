@@ -41,7 +41,7 @@ def test_training_reports_missing_resources_and_restores_ui(tmp_path: Path) -> N
     widget.start_training(tmp_path / "out")
     app.processEvents()
     assert "Required training resources are missing" in widget.log.toPlainText()
-    assert "configuration error" in widget.summary.text()
+    assert "训练配置错误" in widget.summary.text()
     assert widget.run_button.isEnabled()
     assert not widget.cancel_button.isEnabled()
     widget.close()
@@ -111,7 +111,7 @@ def test_success_populates_metrics_and_restores_ui(tmp_path: Path) -> None:
     app.processEvents()
     assert widget.last_outcome is not None
     assert widget.metrics_table.rowCount() == 6
-    assert "weight L2 delta=0.25" in widget.summary.text()
+    assert "权重 L2 变化量=0.25" in widget.summary.text()
     assert widget.run_button.isEnabled()
     assert widget.export_button.isEnabled()
     widget.close()

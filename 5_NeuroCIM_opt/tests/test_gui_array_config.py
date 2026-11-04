@@ -86,7 +86,7 @@ def test_array_controls_drive_preview_fit_settings_and_evidence(tmp_path: Path) 
     assert {row["group"] for row in widget.last_results} == {"linear", "quadratic"}
     linear = next(row for row in widget.last_results if row["group"] == "linear")
     assert f"{linear['r2']:.4f}" == "1.0000"
-    assert "R²: 1.0000" in widget.metrics_summary.text()
+    assert "R²：1.0000" in widget.metrics_summary.text()
     assert (output / "mac_error_model.json").is_file()
 
     evidence = ROOT / "outputs" / "acceptance" / "gui_array_config"
