@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from pathlib import Path
 import random
 
@@ -37,7 +38,11 @@ def create_cifar10_loaders(
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     root = Path(root).expanduser().resolve()
     train_augmented = datasets.CIFAR10(root=root, train=True, transform=_transform(True), download=download)
-    train_evaluation = datasets.CIFAR10(root=root, train=True, transform=_transform(False), download=False)
+    # A second torchvision.CIFAR10 construction duplicates the complete
+    # 50,000 x 3,072 uint8 array (~146 MiB).  A shallow dataset view safely
+    # shares immutable image/target storage while using an evaluation transform.
+    train_evaluation = copy(train_augmented)
+    train_evaluation.transform = _transform(False)
     if not 0 < validation_size < len(train_augmented):
         raise ValueError("validation_size must be between 1 and the training set size")
     indices = torch.randperm(len(train_augmented), generator=torch.Generator().manual_seed(seed)).tolist()

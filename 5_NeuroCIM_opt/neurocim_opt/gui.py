@@ -11,11 +11,11 @@ from typing import Any
 import numpy as np
 
 from PySide6.QtCore import QEvent, QObject, QSize, QSettings, QThread, QTimer, Signal, Qt
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase, QImage, QPixmap
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase, QImage, QPixmap, QPixmapCache
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox as _QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QProgressDialog, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+    QProgressBar, QProgressDialog, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
     QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -56,6 +56,25 @@ VISION_ZOO_MODEL_IDS = frozenset({
     "squeezenet1_1-cifar10",
 })
 RUNTIME_CALIBRATED_MODEL_IDS = frozenset({"bnn-mnist"})
+NOISE_LEVELS = (
+    ("档位 1：关闭附加随机噪声", (0.0, 0.0)),
+    ("档位 2：弱独立噪声（σ=0.005）", (0.005, 0.0)),
+    ("档位 3：中等独立噪声（σ=0.010）", (0.010, 0.0)),
+    ("档位 4：较强独立噪声（σ=0.020）", (0.020, 0.0)),
+    ("档位 5：强独立噪声（σ=0.040）", (0.040, 0.0)),
+    ("档位 6：中等相关噪声（σ=0.010，ρ=0.05）", (0.010, 0.05)),
+)
+
+
+def _setup_noise_combo(combo: QComboBox) -> None:
+    for label, value in NOISE_LEVELS:
+        combo.addItem(label, value)
+
+
+def _setup_adc_combo(combo: QComboBox) -> None:
+    combo.addItem("理想 ADC（关闭量化）", None)
+    for bits in (4, 6, 8, 10):
+        combo.addItem(f"{bits} bit ADC", bits)
 
 
 def _populate_image_model_combo(combo: _QComboBox, project_root: Path, capability: str):
@@ -183,6 +202,117 @@ class QComboBox(_QComboBox):
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
                 QTimer.singleShot(0, self.showPopup)
         return super().eventFilter(watched, event)
+
+
+class CollapsiblePanel(QWidget):
+    """Compact native advanced-options panel; content is hidden by default."""
+
+    def __init__(self, title: str = "高级选项", parent: QWidget | None = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(6)
+        self.toggle = QPushButton(f"{title}  ▾")
+        self.toggle.setCheckable(True); self.toggle.setProperty("advancedToggle", True)
+        self.content = QScrollArea(); self.content.setObjectName("advancedContent")
+        self.content.setWidgetResizable(True); self.content.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.content.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.content.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.content.setMaximumHeight(410)
+        self.content_widget = QFrame(); self.content_widget.setObjectName("advancedContentBody")
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(12, 10, 12, 10)
+        self.content.setWidget(self.content_widget)
+        self.content.hide(); layout.addWidget(self.toggle); layout.addWidget(self.content)
+        self.toggle.toggled.connect(self.content.setVisible)
+        self.toggle.toggled.connect(
+            lambda checked: self.toggle.setText(f"{title}  {'▴' if checked else '▾'}")
+        )
+
+
+class ResponsivePixmapLabel(QLabel):
+    """Keep a high-resolution chart fitted to the currently available card area."""
+
+    def __init__(self, placeholder: str = "", parent: QWidget | None = None):
+        super().__init__(placeholder, parent)
+        self._image_path: Path | None = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def set_image(self, path: str | Path) -> None:
+        self._image_path = Path(path)
+        self.setToolTip(str(self._image_path))
+        self._refresh_pixmap()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        if self._image_path is not None:
+            QTimer.singleShot(0, self._refresh_pixmap)
+
+    def _refresh_pixmap(self) -> None:
+        if self._image_path is None or not self._image_path.is_file():
+            return
+        target = QSize(max(240, self.width() - 8), max(150, self.height() - 8))
+        self.setPixmap(_high_dpi_pixmap(self._image_path, target, self))
+
+
+def _metric_card(title: str, initial: str = "--") -> tuple[QFrame, QLabel]:
+    card = QFrame(); card.setProperty("metricCard", True)
+    layout = QVBoxLayout(card); layout.setContentsMargins(13, 10, 13, 10); layout.setSpacing(2)
+    caption = QLabel(title); caption.setProperty("metricCaption", True)
+    value = QLabel(initial); value.setProperty("metricValue", True)
+    layout.addWidget(caption); layout.addWidget(value)
+    return card, value
+
+
+def _add_independent_columns(
+    host_layout: QVBoxLayout,
+    left_card: QWidget,
+    right_card: QWidget,
+) -> tuple[QScrollArea, QScrollArea]:
+    """Install 2:3 work columns with independent vertical scrolling."""
+    columns = QWidget()
+    columns.setObjectName("independentColumns")
+    columns_layout = QHBoxLayout(columns)
+    columns_layout.setContentsMargins(0, 0, 0, 0)
+    columns_layout.setSpacing(12)
+
+    scrolls: list[QScrollArea] = []
+    for name, card, stretch in (
+        ("leftColumnScroll", left_card, 2),
+        ("rightColumnScroll", right_card, 3),
+    ):
+        card.setMinimumWidth(0)
+        card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        for line_edit in card.findChildren(QLineEdit):
+            line_edit.setMinimumWidth(0)
+            line_edit.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        for combo in card.findChildren(_QComboBox):
+            combo.setMinimumWidth(0)
+            combo.setMinimumContentsLength(8)
+            combo.setSizeAdjustPolicy(_QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        for form in card.findChildren(QFormLayout):
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        canvas = QWidget()
+        canvas.setMinimumSize(0, 0)
+        canvas.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        canvas_layout = QVBoxLayout(canvas)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.addWidget(card, 0, Qt.AlignmentFlag.AlignTop)
+        canvas_layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setObjectName(name)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(0)
+        scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.verticalScrollBar().setSingleStep(24)
+        scroll.setWidget(canvas)
+        columns_layout.addWidget(scroll, stretch)
+        scrolls.append(scroll)
+    host_layout.addWidget(columns, 1)
+    return scrolls[0], scrolls[1]
 
 
 LOGICAL_COLUMNS = (
@@ -334,9 +464,35 @@ QFrame#sideStatus { border: 1px solid #D7E2EE; border-radius: 9px; background-co
 QLabel#homeTitle { color: #172231; font-size: 24px; font-weight: 700; }
 QLabel#contentTitle { color: #172231; font-size: 22px; font-weight: 700; }
 QLabel#contentSubtitle { color: #687A91; }
-QLabel#homeHero { color: #126DBF; font-size: 25px; font-weight: 700; }
+QLabel#homeHero { color: #126DBF; font-size: 13px; font-weight: 700; }
 QLabel[muted="true"] { color: #687A91; }
 QFrame[dashboardCard="true"] { border: 1px solid #D7E2EE; border-radius: 10px; background-color: #FFFFFF; }
+QFrame#flowBar { background-color: #FFFFFF; border-bottom: 1px solid #D7E2EE; }
+QLabel#flowTitle { color: #53657B; font-weight: 700; padding-right: 8px; }
+QPushButton[flowStep="true"] { min-height: 34px; padding: 0 15px; border: 1px solid #D6E0EB; border-radius: 17px; background: #F7F9FC; color: #526477; }
+QPushButton[flowStep="true"]:hover { border-color: #82AFE6; color: #126DBF; background: #F0F7FF; }
+QPushButton[flowStep="true"]:checked { border-color: #1976C9; color: #126DBF; background: #E7F2FC; font-weight: 700; }
+QPushButton[advancedToggle="true"] { min-height: 32px; border: none; background: transparent; color: #526477; }
+QPushButton[advancedToggle="true"]:hover, QPushButton[advancedToggle="true"]:checked { color: #126DBF; background: #EEF6FE; }
+QFrame#advancedNavigation { background: #F7FAFD; border-bottom: 1px solid #D7E2EE; }
+QFrame#fitModePanel { background: #FFFFFF; border-right: 1px solid #D7E2EE; }
+QPushButton[fitMode="true"] { min-height: 42px; border: 1px solid #D7E2EE; border-radius: 7px; background: #F7F9FC; color: #526477; text-align: left; padding-left: 12px; }
+QPushButton[fitMode="true"]:checked { border-color: #1976C9; background: #E7F2FC; color: #126DBF; font-weight: 700; }
+QPushButton[advancedNav="true"] { min-height: 30px; border: 1px solid #D6E0EB; border-radius: 6px; background: #FFFFFF; color: #526477; }
+QPushButton[advancedNav="true"]:checked { border-color: #1976C9; color: #126DBF; background: #E7F2FC; }
+QFrame#rememberedConfig { border: 1px solid #CFE3F6; border-radius: 8px; background: #EFF7FF; }
+QFrame[entryCard="true"] { border: 1px solid #D7E2EE; border-radius: 11px; background-color: #FFFFFF; }
+QFrame[entryCard="true"]:hover { border-color: #9EC2E8; }
+QFrame[workCard="true"] { border: 1px solid #D7E2EE; border-radius: 11px; background-color: #FFFFFF; }
+QScrollArea#advancedContent, QFrame#advancedContentBody { border: 1px solid #DCE5EF; border-radius: 8px; background: #F7FAFD; }
+QFrame[metricCard="true"] { border: 1px solid #CFE0F2; border-radius: 9px; background: #F2F8FE; }
+QLabel[metricCaption="true"] { color: #5E7189; font-size: 13px; font-weight: 600; }
+QLabel[metricValue="true"] { color: #126DBF; font-size: 30px; font-weight: 750; }
+QLabel[sectionTitle="true"] { color: #24364A; font-size: 16px; font-weight: 700; padding: 2px 0 7px 0; }
+QLabel[sectionHint="true"] { color: #687A91; padding-bottom: 4px; }
+QLabel#entryIcon { color: #1976C9; font-size: 30px; font-weight: 700; }
+QLabel#entryTitle { color: #24364A; font-size: 20px; font-weight: 700; }
+QLabel#entryMeta { color: #526477; background: #F5F8FB; border-radius: 6px; padding: 9px; }
 QWidget#pageContent, QScrollArea#pageScroll > QWidget > QWidget {
     background-color: #F4F7FB;
 }
@@ -719,7 +875,9 @@ class InferenceThread(QThread):
 
     def __init__(self, service: PlatformService, project_root: Path, model_id: str,
                  sample_index: int, dataset_root: Path, checkpoint: Path,
-                 auxiliary: Path | None, error_model: Path, device: str):
+                 auxiliary: Path | None, error_model: Path, device: str,
+                 adc_bits: int | None = None, noise_sigma: float = 0.0,
+                 noise_rho: float = 0.0):
         super().__init__()
         self.service = service
         self.project_root = project_root
@@ -730,6 +888,7 @@ class InferenceThread(QThread):
         self.auxiliary = auxiliary
         self.error_model = error_model
         self.device = device
+        self.adc_bits = adc_bits; self.noise_sigma = noise_sigma; self.noise_rho = noise_rho
 
     def run(self) -> None:
         try:
@@ -738,7 +897,8 @@ class InferenceThread(QThread):
                     self.project_root, self.model_id, self.sample_index,
                     dataset_root=self.dataset_root, checkpoint_path=self.checkpoint,
                     auxiliary_path=self.auxiliary, error_model_path=self.error_model,
-                    device=self.device,
+                    device=self.device, adc_bits=self.adc_bits,
+                    noise_sigma=self.noise_sigma, noise_rho=self.noise_rho,
                 )
             )
         except Exception as exc:
@@ -930,6 +1090,8 @@ class WikiText2EvaluationThread(QThread):
 class CellFittingWidget(QWidget):
     """Import transistor measurements, fit them, and create a reusable error model."""
 
+    fit_mode_requested = Signal(int)
+
     MAPPING_FIELDS = (
         ("X", "输入数字码（X）"), ("W", "权重数字码（W）"),
         ("VD", "输入电压（VD）"), ("VG", "栅极电压（VG）"),
@@ -953,7 +1115,23 @@ class CellFittingWidget(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+        self.setProperty("usesIndependentColumnScroll", True)
+        left_card = QFrame(); left_card.setProperty("workCard", True)
+        left = QVBoxLayout(left_card); left.setContentsMargins(18, 16, 18, 16); left.setSpacing(10)
+        left_title = QLabel("误差数据与拟合配置"); left_title.setProperty("sectionTitle", True); left.addWidget(left_title)
+        left_hint = QLabel("导入器件或阵列测量 CSV，完成列映射后生成多种可复用误差模型。")
+        left_hint.setProperty("sectionHint", True); left_hint.setWordWrap(True); left.addWidget(left_hint)
+        mode_row = QHBoxLayout(); mode_row.addWidget(QLabel("拟合对象"))
+        self.device_mode_button = QPushButton("器件误差拟合"); self.device_mode_button.setCheckable(True)
+        self.array_mode_button = QPushButton("阵列误差拟合"); self.array_mode_button.setCheckable(True)
+        mode_group = QButtonGroup(self); mode_group.setExclusive(True)
+        for button in (self.device_mode_button, self.array_mode_button):
+            button.setProperty("fitMode", True); mode_group.addButton(button); mode_row.addWidget(button)
+        self.device_mode_button.setChecked(True)
+        self.device_mode_button.clicked.connect(lambda: self.fit_mode_requested.emit(0))
+        self.array_mode_button.clicked.connect(lambda: self.fit_mode_requested.emit(1))
+        mode_row.addStretch(); left.addLayout(mode_row)
+        form = QFormLayout(); form.setSpacing(9)
         self.path_edit = QLineEdit()
         self.path_edit.editingFinished.connect(self._refresh_mapping_columns)
         source_row = QHBoxLayout(); source_row.addWidget(self.path_edit)
@@ -979,7 +1157,7 @@ class CellFittingWidget(QWidget):
         self.code_format_combo = QComboBox()
         for label, value in (("自动识别", "auto"), ("十进制", "decimal"), ("二进制", "binary")):
             self.code_format_combo.addItem(label, value)
-        form.addRow("数字码格式", self.code_format_combo); layout.addLayout(form)
+        form.addRow("数字码格式", self.code_format_combo); left.addLayout(form)
 
         mapping_box = QGroupBox("CSV 列映射（从表头选择，或使用自动识别）")
         mapping_form = QFormLayout(mapping_box); self.mapping_edits: dict[str, QComboBox] = {}
@@ -989,26 +1167,39 @@ class CellFittingWidget(QWidget):
             combo.lineEdit().setPlaceholderText(key)
             self.mapping_edits[key] = combo
             mapping_form.addRow(label, combo)
-        layout.addWidget(mapping_box)
+        left.addWidget(mapping_box)
         units = QHBoxLayout()
         self.vd_unit_edit = QLineEdit("V"); self.vg_unit_edit = QLineEdit("V"); self.output_unit_edit = QLineEdit("A")
         units.addWidget(QLabel("VD 单位")); units.addWidget(self.vd_unit_edit)
         units.addWidget(QLabel("VG 单位")); units.addWidget(self.vg_unit_edit)
-        units.addWidget(QLabel("输出单位")); units.addWidget(self.output_unit_edit); layout.addLayout(units)
+        units.addWidget(QLabel("输出单位")); units.addWidget(self.output_unit_edit); left.addLayout(units)
         self.output_edit = QLineEdit(); output_row = QHBoxLayout(); output_row.addWidget(self.output_edit)
         output_button = QPushButton("选择目录"); output_button.clicked.connect(self._browse_output); output_row.addWidget(output_button)
-        output_form = QFormLayout(); output_form.addRow("输出目录", output_row); layout.addLayout(output_form)
+        output_form = QFormLayout(); output_form.addRow("输出目录", output_row); left.addLayout(output_form)
         controls = QHBoxLayout(); self.preview_button = QPushButton("预览并校验")
         self.preview_button.clicked.connect(self.preview); self.fit_button = QPushButton("开始拟合并生成误差模型")
         self.fit_button.clicked.connect(self.start_fit); controls.addWidget(self.preview_button); controls.addWidget(self.fit_button)
-        controls.addStretch(); layout.addLayout(controls)
-        self.progress = QProgressBar(); layout.addWidget(self.progress)
-        self.summary = QLabel("就绪"); self.summary.setWordWrap(True); layout.addWidget(self.summary)
-        splitter = QSplitter(); self.table = QTableWidget(); self.table.setAlternatingRowColors(True)
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); splitter.addWidget(self.table); splitter.addWidget(self.log)
-        splitter.setStretchFactor(0, 3); splitter.setStretchFactor(1, 2); layout.addWidget(splitter, 1)
-        self.plot_tabs = QTabWidget(); self.plot_tabs.setMinimumHeight(300); self.plot_tabs.setVisible(False)
-        layout.addWidget(self.plot_tabs)
+        controls.addStretch(); left.addLayout(controls)
+        self.progress = QProgressBar(); left.addWidget(self.progress)
+        self.summary = QLabel("就绪"); self.summary.setWordWrap(True); left.addWidget(self.summary)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(135)
+        left.addWidget(QLabel("运行日志")); left.addWidget(self.log)
+
+        right_card = QFrame(); right_card.setProperty("workCard", True)
+        right = QVBoxLayout(right_card); right.setContentsMargins(18, 16, 18, 16); right.setSpacing(10)
+        right_title = QLabel("数据预览与拟合结果"); right_title.setProperty("sectionTitle", True); right.addWidget(right_title)
+        metrics = QHBoxLayout(); metrics.setSpacing(10)
+        r2_card, self.r2_metric = _metric_card("决定系数 R²")
+        nl_card, self.nl_metric = _metric_card("非线性误差")
+        model_card, self.model_count_metric = _metric_card("可选误差模型")
+        metrics.addWidget(r2_card); metrics.addWidget(nl_card); metrics.addWidget(model_card)
+        right.addLayout(metrics)
+        self.table = QTableWidget(); self.table.setAlternatingRowColors(True)
+        self.table.setProperty("compactColumns", True)
+        self.table.horizontalHeader().setStretchLastSection(False); right.addWidget(self.table)
+        self.plot_tabs = QTabWidget(); self.plot_tabs.setMinimumHeight(390); self.plot_tabs.setMaximumHeight(560); self.plot_tabs.setVisible(False)
+        right.addWidget(self.plot_tabs, 1)
+        self.left_scroll, self.right_scroll = _add_independent_columns(layout, left_card, right_card)
 
     def _options(self) -> CellImportOptions:
         mapping = {}
@@ -1157,7 +1348,7 @@ class CellFittingWidget(QWidget):
         self.table.setHorizontalHeaderLabels([header_names.get(column, column) for column in columns])
         for row, record in enumerate(records):
             for column, key in enumerate(columns): self.table.setItem(row, column, QTableWidgetItem(str(record[key])))
-        self.table.resizeColumnsToContents()
+        self.table.resizeColumnsToContents(); _fit_result_table_height(self.table, max_visible_rows=5)
 
     def preview(self) -> None:
         try:
@@ -1198,6 +1389,8 @@ class CellFittingWidget(QWidget):
     def _fit_succeeded(self, outcome: CellFitOutcome) -> None:
         self.last_outcome = outcome
         shown_models = list(outcome.models)
+        self.r2_metric.setText(f"{outcome.metrics['r2']:.5f}")
+        self.nl_metric.setText(f"{outcome.metrics['nl_percent_fs']:.3f}% FS")
         self.summary.setText(f"误差模型：{outcome.error_model_path}｜交互项 R²={outcome.metrics['r2']:.6f}｜非线性度={outcome.metrics['nl_percent_fs']:.6f}% FS")
         self.log.appendPlainText("拟合摘要：" + str(outcome.summary_path))
         if self.coordinator is not None:
@@ -1220,6 +1413,7 @@ class CellFittingWidget(QWidget):
             self.summary.setText(
                 f"拟合完成：已生成 {len(selectable)} 种可选误差模型。后续推理页面可通过下拉框选择。"
             )
+            self.model_count_metric.setText(str(len(selectable)))
         self._show_records(shown_models)
         self.plot_tabs.clear()
         plot_names = {
@@ -1232,9 +1426,9 @@ class CellFittingWidget(QWidget):
             self.log.appendPlainText("图表：" + str(path))
             pixmap = _high_dpi_pixmap(path, QSize(920, 285), self)
             if not pixmap.isNull():
-                label = QLabel(); label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                label.setPixmap(pixmap)
-                label.setToolTip(str(path)); self.plot_tabs.addTab(label, plot_names.get(path.stem, path.stem.replace("_", " ")))
+                label = ResponsivePixmapLabel(); label.setMinimumHeight(355)
+                label.set_image(path)
+                self.plot_tabs.addTab(label, plot_names.get(path.stem, path.stem.replace("_", " ")))
         self.plot_tabs.setVisible(self.plot_tabs.count() > 0)
 
     def _fit_failed(self, details: str) -> None:
@@ -1277,6 +1471,8 @@ class CellFittingWidget(QWidget):
 class MacAnalysisWidget(QWidget):
     """Import, select and fit one physical array configuration."""
 
+    fit_mode_requested = Signal(int)
+
     def __init__(self, platform_root: Path, parent: QWidget | None = None):
         super().__init__(parent)
         application = QApplication.instance()
@@ -1293,6 +1489,16 @@ class MacAnalysisWidget(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        mode_row = QHBoxLayout(); mode_row.addWidget(QLabel("拟合对象"))
+        self.device_mode_button = QPushButton("器件误差拟合"); self.device_mode_button.setCheckable(True)
+        self.array_mode_button = QPushButton("阵列误差拟合"); self.array_mode_button.setCheckable(True)
+        mode_group = QButtonGroup(self); mode_group.setExclusive(True)
+        for button in (self.device_mode_button, self.array_mode_button):
+            button.setProperty("fitMode", True); mode_group.addButton(button); mode_row.addWidget(button)
+        self.array_mode_button.setChecked(True)
+        self.device_mode_button.clicked.connect(lambda: self.fit_mode_requested.emit(0))
+        self.array_mode_button.clicked.connect(lambda: self.fit_mode_requested.emit(1))
+        mode_row.addStretch(); root.addLayout(mode_row)
         source_group = QGroupBox("阵列 MAC 数据")
         source_layout = QGridLayout(source_group)
         self.path_edit = QLineEdit()
@@ -1498,13 +1704,15 @@ class SingleInferenceWidget(QWidget):
         self.last_outcome: SingleInferenceOutcome | None = None
         self._active_model_id = ""
         layout = QVBoxLayout(self)
-        description = QLabel(
-            "选择网络、数据集、Checkpoint 和器件误差模型，比较原生、理想差分和器件差分结果。"
-        )
-        description.setWordWrap(True)
-        layout.addWidget(description)
+        self.setProperty("usesIndependentColumnScroll", True)
+        left_card = QFrame(); left_card.setProperty("workCard", True)
+        left = QVBoxLayout(left_card); left.setContentsMargins(18, 16, 18, 16); left.setSpacing(10)
+        left_title = QLabel("推理配置"); left_title.setProperty("sectionTitle", True); left.addWidget(left_title)
+        description = QLabel("选择网络、数据集与器件误差模型，比较三种计算模式。")
+        description.setProperty("sectionHint", True); description.setWordWrap(True); left.addWidget(description)
 
-        form = QFormLayout()
+        form = QFormLayout(); form.setSpacing(9)
+        advanced = CollapsiblePanel(); advanced_form = QFormLayout(); advanced_form.setSpacing(8)
         self.model_combo = QComboBox()
         self.model_registry = _populate_image_model_combo(
             self.model_combo, self.project_root, "single_inference"
@@ -1514,40 +1722,50 @@ class SingleInferenceWidget(QWidget):
         form.addRow("数据集", self.dataset_name)
         self.dataset_edit = QLineEdit(); dataset_row = QHBoxLayout(); dataset_row.addWidget(self.dataset_edit)
         dataset_button = QPushButton("选择目录"); dataset_button.clicked.connect(self._browse_dataset)
-        dataset_row.addWidget(dataset_button); form.addRow("数据集根目录", dataset_row)
+        dataset_row.addWidget(dataset_button); advanced_form.addRow("数据集根目录", dataset_row)
         self.checkpoint_edit = QLineEdit(); checkpoint_row = QHBoxLayout(); checkpoint_row.addWidget(self.checkpoint_edit)
         checkpoint_button = QPushButton("选择文件"); checkpoint_button.clicked.connect(self._browse_checkpoint)
-        checkpoint_row.addWidget(checkpoint_button); form.addRow("Checkpoint", checkpoint_row)
+        checkpoint_row.addWidget(checkpoint_button); advanced_form.addRow("Checkpoint", checkpoint_row)
         self.auxiliary_label = QLabel("量化参数")
         self.auxiliary_edit = QLineEdit(); auxiliary_row = QHBoxLayout(); auxiliary_row.addWidget(self.auxiliary_edit)
         auxiliary_button = QPushButton("选择文件"); auxiliary_button.clicked.connect(self._browse_auxiliary)
-        auxiliary_row.addWidget(auxiliary_button); form.addRow(self.auxiliary_label, auxiliary_row)
+        auxiliary_row.addWidget(auxiliary_button); advanced_form.addRow(self.auxiliary_label, auxiliary_row)
         self.error_model_combo = QComboBox()
         form.addRow("误差建模方法", self.error_model_combo)
+        self.noise_combo = QComboBox(); _setup_noise_combo(self.noise_combo)
+        form.addRow("附加随机噪声", self.noise_combo)
+        self.adc_combo = QComboBox(); _setup_adc_combo(self.adc_combo)
+        form.addRow("ADC 量化", self.adc_combo)
         self.error_model_edit = QLineEdit(); self.error_model_edit.setReadOnly(require_workflow)
         error_row = QHBoxLayout(); error_row.addWidget(self.error_model_edit)
         error_button = QPushButton("选择文件"); error_button.clicked.connect(self._browse_error_model)
         error_button.setEnabled(not require_workflow)
-        error_row.addWidget(error_button); form.addRow("器件误差模型", error_row)
+        error_row.addWidget(error_button); advanced_form.addRow("器件误差模型文件", error_row)
         self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
-        form.addRow("运行设备", self.device_combo)
+        advanced_form.addRow("运行设备", self.device_combo)
         self.sample_index = QSpinBox(); self.sample_index.setRange(0, 9999)
         form.addRow("测试样本索引", self.sample_index)
-        layout.addLayout(form)
+        left.addLayout(form)
+        advanced.content_layout.addLayout(advanced_form); left.addWidget(advanced)
 
         self.resource_status = QLabel()
         self.resource_status.setWordWrap(True)
-        layout.addWidget(self.resource_status)
+        left.addWidget(self.resource_status)
         for edit in (self.dataset_edit, self.checkpoint_edit, self.auxiliary_edit, self.error_model_edit):
             edit.textChanged.connect(self._update_resource_status)
 
         controls = QHBoxLayout(); self.run_button = QPushButton("运行单样本推理")
         self.run_button.clicked.connect(self.start_inference)
-        controls.addWidget(self.run_button); controls.addStretch(); layout.addLayout(controls)
-        self.progress = QProgressBar(); self.progress.setRange(0, 100); layout.addWidget(self.progress)
-        self.summary = QLabel("尚未运行"); self.summary.setWordWrap(True); layout.addWidget(self.summary)
+        controls.addWidget(self.run_button); controls.addStretch(); left.addLayout(controls)
+        self.progress = QProgressBar(); self.progress.setRange(0, 100); left.addWidget(self.progress)
+        self.summary = QLabel("尚未运行"); self.summary.setWordWrap(True); left.addWidget(self.summary)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100)
+        left.addWidget(QLabel("运行日志")); left.addWidget(self.log)
 
-        result_area = QHBoxLayout()
+        right_card = QFrame(); right_card.setProperty("workCard", True)
+        right = QVBoxLayout(right_card); right.setContentsMargins(18, 16, 18, 16); right.setSpacing(10)
+        right_title = QLabel("输入与推理结果"); right_title.setProperty("sectionTitle", True); right.addWidget(right_title)
+        result_area = QHBoxLayout(); result_area.setSpacing(12)
         image_group = QGroupBox("输入与最终结果")
         image_layout = QVBoxLayout(image_group)
         self.input_image = QLabel("运行后显示输入图片")
@@ -1573,9 +1791,8 @@ class SingleInferenceWidget(QWidget):
         _fit_result_table_height(self.top5_table, max_visible_rows=8)
         tables.addWidget(self.top5_table)
         result_area.addLayout(tables, 3)
-        layout.addLayout(result_area)
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100)
-        layout.addWidget(self.log)
+        right.addLayout(result_area)
+        self.left_scroll, self.right_scroll = _add_independent_columns(layout, left_card, right_card)
 
         requested_model = str(self.settings.value("inference/model", "lenet5-mnist"))
         saved_model = requested_model
@@ -1796,8 +2013,12 @@ class SingleInferenceWidget(QWidget):
         self.log.appendPlainText(f"开始推理：{model_id}，样本 {self.sample_index.value()}")
         self._save_model_settings(model_id)
         self.settings.setValue("inference/model", model_id); self.settings.setValue("inference/device", device)
-        self.worker = InferenceThread(self.service, self.project_root, model_id, self.sample_index.value(),
-                                      dataset, checkpoint, auxiliary, error_model, device)
+        sigma, rho = self.noise_combo.currentData()
+        self.worker = InferenceThread(
+            self.service, self.project_root, model_id, self.sample_index.value(),
+            dataset, checkpoint, auxiliary, error_model, device,
+            self.adc_combo.currentData(), float(sigma), float(rho),
+        )
         self.worker.succeeded.connect(self._inference_succeeded); self.worker.failed.connect(self._inference_failed)
         self.worker.finished.connect(self._inference_finished); self.worker.start()
 
@@ -1908,14 +2129,15 @@ class BatchInferenceWidget(QWidget):
         self.last_outcome: GroupedBatchInferenceOutcome | None = None
         platform = self.project_root / "5_NeuroCIM_opt"
         layout = QVBoxLayout(self)
-        description = QLabel(
-            "选择误差建模方法和网络后批量运行对应测试集，对比浮点、理想正负权重差分和器件误差差分结果；"
-            "柱状图按每 N 个连续样本统计平均准确率，最后不足 N 个的样本单独成组。"
-        )
-        description.setWordWrap(True)
-        layout.addWidget(description)
+        self.setProperty("usesIndependentColumnScroll", True)
+        left_card = QFrame(); left_card.setProperty("workCard", True)
+        left = QVBoxLayout(left_card); left.setContentsMargins(18, 16, 18, 16); left.setSpacing(10)
+        left_title = QLabel("批量推理配置"); left_title.setProperty("sectionTitle", True); left.addWidget(left_title)
+        description = QLabel("选择误差模型与网络，批量比较浮点、理想差分和器件误差差分。")
+        description.setProperty("sectionHint", True); description.setWordWrap(True); left.addWidget(description)
 
-        form = QFormLayout()
+        form = QFormLayout(); form.setSpacing(9)
+        advanced = CollapsiblePanel(); advanced_form = QFormLayout(); advanced_form.setSpacing(8)
         self.model_combo = QComboBox()
         self.model_registry = _populate_image_model_combo(
             self.model_combo, self.project_root, "batch_inference"
@@ -1927,26 +2149,30 @@ class BatchInferenceWidget(QWidget):
         self.dataset_edit = QLineEdit()
         dataset_row = QHBoxLayout(); dataset_row.addWidget(self.dataset_edit)
         dataset_button = QPushButton("选择目录"); dataset_button.clicked.connect(self._browse_dataset)
-        dataset_row.addWidget(dataset_button); form.addRow("数据集根目录", dataset_row)
+        dataset_row.addWidget(dataset_button); advanced_form.addRow("数据集根目录", dataset_row)
 
         self.checkpoint_edit = QLineEdit()
         checkpoint_row = QHBoxLayout(); checkpoint_row.addWidget(self.checkpoint_edit)
         checkpoint_button = QPushButton("选择文件"); checkpoint_button.clicked.connect(self._browse_checkpoint)
-        checkpoint_row.addWidget(checkpoint_button); form.addRow("Checkpoint", checkpoint_row)
+        checkpoint_row.addWidget(checkpoint_button); advanced_form.addRow("Checkpoint", checkpoint_row)
 
         self.auxiliary_label = QLabel("量化参数")
         self.quantization_edit = QLineEdit()
         quantization_row = QHBoxLayout(); quantization_row.addWidget(self.quantization_edit)
         quantization_button = QPushButton("选择文件"); quantization_button.clicked.connect(self._browse_quantization)
-        quantization_row.addWidget(quantization_button); form.addRow(self.auxiliary_label, quantization_row)
+        quantization_row.addWidget(quantization_button); advanced_form.addRow(self.auxiliary_label, quantization_row)
 
         self.error_model_combo = QComboBox(); form.addRow("误差建模方法", self.error_model_combo)
+        self.noise_combo = QComboBox(); _setup_noise_combo(self.noise_combo)
+        form.addRow("附加随机噪声", self.noise_combo)
+        self.adc_combo = QComboBox(); _setup_adc_combo(self.adc_combo)
+        form.addRow("ADC 量化", self.adc_combo)
         self.error_model_edit = QLineEdit(str(platform / "outputs/error_models/01_NMOS/error_model.json"))
         self.error_model_edit.setReadOnly(require_workflow)
         error_row = QHBoxLayout(); error_row.addWidget(self.error_model_edit)
         error_button = QPushButton("选择文件"); error_button.clicked.connect(self._browse_error_model)
         error_button.setEnabled(not require_workflow)
-        error_row.addWidget(error_button); form.addRow("器件误差模型", error_row)
+        error_row.addWidget(error_button); advanced_form.addRow("器件误差模型文件", error_row)
 
         parameter_row = QHBoxLayout()
         self.sample_count = QSpinBox(); self.sample_count.setRange(1, 10_000); self.sample_count.setValue(1_000)
@@ -1955,41 +2181,54 @@ class BatchInferenceWidget(QWidget):
         parameter_row.addWidget(QLabel("样本数")); parameter_row.addWidget(self.sample_count)
         parameter_row.addWidget(QLabel("每组 N")); parameter_row.addWidget(self.group_size)
         parameter_row.addWidget(QLabel("推理 batch")); parameter_row.addWidget(self.batch_size)
-        parameter_row.addStretch(); form.addRow("统计设置", parameter_row)
+        parameter_row.addStretch(); advanced_form.addRow("统计设置", parameter_row)
 
         self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
-        form.addRow("运行设备", self.device_combo)
+        advanced_form.addRow("运行设备", self.device_combo)
         default_output = platform / "outputs/gui_batch_inference" / "batch_result.json"
         self.output_edit = QLineEdit(str(default_output))
         output_row = QHBoxLayout(); output_row.addWidget(self.output_edit)
         output_button = QPushButton("选择文件"); output_button.clicked.connect(self._browse_output)
-        output_row.addWidget(output_button); form.addRow("结果 JSON", output_row)
-        layout.addLayout(form)
+        output_row.addWidget(output_button); advanced_form.addRow("结果 JSON", output_row)
+        left.addLayout(form)
+        advanced.content_layout.addLayout(advanced_form); left.addWidget(advanced)
 
         controls = QHBoxLayout()
         self.run_button = QPushButton("运行带误差批量推理"); self.run_button.clicked.connect(self.start_inference)
         self.cancel_button = QPushButton("取消"); self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_inference)
         controls.addWidget(self.run_button); controls.addWidget(self.cancel_button); controls.addStretch()
-        layout.addLayout(controls)
-        self.summary = QLabel("尚未运行"); self.summary.setWordWrap(True); layout.addWidget(self.summary)
-        self.progress = QProgressBar(); self.progress.setRange(0, 100); layout.addWidget(self.progress)
+        left.addLayout(controls)
+        self.progress = QProgressBar(); self.progress.setRange(0, 100); left.addWidget(self.progress)
+        self.summary = QLabel("尚未运行"); self.summary.setWordWrap(True); left.addWidget(self.summary)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(145)
+        left.addWidget(QLabel("运行日志")); left.addWidget(self.log)
 
+        right_card = QFrame(); right_card.setProperty("workCard", True)
+        right = QVBoxLayout(right_card); right.setContentsMargins(18, 16, 18, 16); right.setSpacing(10)
+        right_title = QLabel("批量推理结果"); right_title.setProperty("sectionTitle", True); right.addWidget(right_title)
+        metrics = QHBoxLayout(); metrics.setSpacing(10)
+        float_card, self.float_accuracy_metric = _metric_card("浮点准确率")
+        ideal_card, self.ideal_accuracy_metric = _metric_card("理想差分准确率")
+        device_card, self.device_accuracy_metric = _metric_card("器件误差准确率")
+        metrics.addWidget(float_card); metrics.addWidget(ideal_card); metrics.addWidget(device_card)
+        right.addLayout(metrics)
         self.result_table = QTableWidget(0, 5)
         self.result_table.setHorizontalHeaderLabels(["模式", "正确数", "样本数", "总体准确率", "耗时 (ms)"])
         _fit_result_table_height(self.result_table, max_visible_rows=3)
-        layout.addWidget(self.result_table)
+        right.addWidget(self.result_table)
         chart_group = QGroupBox("每 N 个样本的平均准确率柱状图")
+        chart_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        chart_group.setMaximumHeight(420)
         chart_layout = QVBoxLayout(chart_group)
         self.chart_scroll = QScrollArea(); self.chart_scroll.setWidgetResizable(True)
         self.chart_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.chart_scroll.setMinimumHeight(270); self.chart_scroll.setMaximumHeight(350)
-        self.chart_label = QLabel("运行后显示分组准确率柱状图")
-        self.chart_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.chart_label.setMinimumHeight(250)
+        self.chart_scroll.setMinimumHeight(300); self.chart_scroll.setMaximumHeight(365)
+        self.chart_label = ResponsivePixmapLabel("运行后显示分组准确率柱状图")
+        self.chart_label.setMinimumHeight(305)
         self.chart_scroll.setWidget(self.chart_label); chart_layout.addWidget(self.chart_scroll)
-        layout.addWidget(chart_group)
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(150)
-        layout.addWidget(self.log)
+        right.addWidget(chart_group)
+        self.left_scroll, self.right_scroll = _add_independent_columns(layout, left_card, right_card)
         self.model_combo.currentIndexChanged.connect(self._model_changed)
         self.model_combo.setCurrentIndex(max(0, self.model_combo.findData("lenet5-mnist")))
         self._model_changed(self.model_combo.currentIndex())
@@ -2078,6 +2317,7 @@ class BatchInferenceWidget(QWidget):
 
     def _request(self) -> BatchInferenceRequest:
         auxiliary = self.quantization_edit.text().strip()
+        sigma, rho = self.noise_combo.currentData()
         return BatchInferenceRequest(
             project_root=self.project_root,
             dataset_root=Path(self.dataset_edit.text().strip()),
@@ -2087,6 +2327,7 @@ class BatchInferenceWidget(QWidget):
             model_id=str(self.model_combo.currentData()), device=_device_value(self.device_combo),
             sample_count=self.sample_count.value(), group_size=self.group_size.value(),
             inference_batch_size=self.batch_size.value(), output_path=Path(self.output_edit.text().strip()),
+            adc_bits=self.adc_combo.currentData(), noise_sigma=float(sigma), noise_rho=float(rho),
         )
 
     def start_inference(self) -> None:
@@ -2139,6 +2380,9 @@ class BatchInferenceWidget(QWidget):
 
     def _succeeded(self, outcome: GroupedBatchInferenceOutcome) -> None:
         self.last_outcome = outcome
+        self.float_accuracy_metric.setText(f"{outcome.modes['float'].accuracy:.2%}")
+        self.ideal_accuracy_metric.setText(f"{outcome.modes['ideal_differential'].accuracy:.2%}")
+        self.device_accuracy_metric.setText(f"{outcome.modes['device_differential'].accuracy:.2%}")
         self.result_table.setRowCount(len(outcome.modes))
         for row, (mode, result) in enumerate(outcome.modes.items()):
             values = (self.MODE_NAMES.get(mode, mode), result.correct, result.sample_count,
@@ -2147,16 +2391,22 @@ class BatchInferenceWidget(QWidget):
                 self.result_table.setItem(row, column, QTableWidgetItem(str(value)))
         self.result_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=3)
         chart_path = self._save_chart(outcome)
-        target = self.chart_scroll.viewport().size()
-        target.setWidth(max(640, target.width() - 12)); target.setHeight(320)
-        self.chart_label.setPixmap(_high_dpi_pixmap(chart_path, target, self.chart_label))
+        self.chart_label.set_image(chart_path)
         device_accuracy = outcome.modes["device_differential"].accuracy
         self.summary.setText(
             f"完成：{outcome.sample_count} 个样本，共 {len(outcome.groups)} 组，"
-            f"器件误差准确率 {device_accuracy:.2%}，设备 {outcome.device}"
+            f"器件误差准确率 {device_accuracy:.2%}，设备 {outcome.device}，"
+            f"有效 batch {outcome.inference_batch_size}"
         )
         self.log.appendPlainText(f"结果 JSON：{outcome.output_path}")
         self.log.appendPlainText(f"准确率柱状图：{chart_path}")
+        free_bytes = int(outcome.resources.get("cuda_free_bytes_at_start", "0"))
+        self.log.appendPlainText(
+            "显存自适应：请求 batch "
+            f"{outcome.resources.get('requested_batch_size', outcome.inference_batch_size)}，"
+            f"实际最小 batch {outcome.inference_batch_size}，"
+            f"启动时可用显存 {free_bytes / 1024 ** 3:.2f} GiB"
+        )
         if self.coordinator is not None and self.error_model_combo.currentData():
             auxiliary = self.quantization_edit.text().strip() or None
             try:
@@ -2182,12 +2432,12 @@ class BatchInferenceWidget(QWidget):
         chart_path.parent.mkdir(parents=True, exist_ok=True)
         font_path = Path(r"C:\Windows\Fonts\msyh.ttc")
         chinese_font = FontProperties(fname=str(font_path)) if font_path.is_file() else None
-        group_count = len(outcome.groups); width = max(7.2, min(11.0, group_count * 0.42))
-        figure = Figure(figsize=(width, 3.6), tight_layout=True, facecolor="#FFFFFF")
+        group_count = len(outcome.groups)
+        figure = Figure(figsize=(10.0, 3.75), constrained_layout=True, facecolor="#FFFFFF")
         FigureCanvasAgg(figure); axes = figure.add_subplot(111)
         axes.set_facecolor("#FFFFFF")
-        positions = np.arange(group_count); bar_width = 0.25
-        colors = ("#94A3B8", "#2F80ED", "#F97316")
+        positions = np.arange(group_count); bar_width = min(0.25, 0.78 / 3)
+        colors = ("#9AA9BC", "#347FD1", "#F28C45")
         for offset, (mode, color) in enumerate(zip(
             ("float", "ideal_differential", "device_differential"), colors
         )):
@@ -2195,27 +2445,29 @@ class BatchInferenceWidget(QWidget):
             axes.bar(positions + (offset - 1) * bar_width, values, bar_width,
                      label=self.CHART_MODE_NAMES[mode], color=color)
         labels = [f"{group.start_index}-{group.end_index}" for group in outcome.groups]
-        label_step = max(1, int(np.ceil(group_count / 12)))
+        label_step = max(1, int(np.ceil(group_count / 8)))
         shown = positions[::label_step]
         axes.set_xticks(shown, [labels[index] for index in range(0, group_count, label_step)],
-                        rotation=35, ha="right")
-        axes.set_ylim(0, 105)
+                        rotation=0, ha="center", fontsize=10)
+        axes.set_ylim(0, 102)
         axes.set_ylabel("准确率（%）", fontproperties=chinese_font)
-        axes.set_xlabel("样本索引范围", fontproperties=chinese_font)
-        axes.set_title("分组准确率对比", color="#26344D", pad=10,
-                       fontproperties=chinese_font)
-        axes.grid(axis="y", color="#D9E2EE", linewidth=0.8, alpha=0.85)
+        axes.set_title("分组准确率对比", color="#26344D", pad=8, loc="left",
+                       fontproperties=chinese_font, fontsize=13, fontweight="bold")
+        axes.grid(axis="y", color="#D9E2EE", linewidth=1.1, alpha=0.85)
         axes.set_axisbelow(True)
         axes.spines[["top", "right"]].set_visible(False)
         axes.spines[["left", "bottom"]].set_color("#9AAAC0")
-        axes.tick_params(colors="#526077")
-        axes.legend(loc="upper center", bbox_to_anchor=(0.5, 1.01), ncol=3,
-                    frameon=False, prop=chinese_font)
+        axes.spines[["left", "bottom"]].set_linewidth(1.2)
+        axes.tick_params(colors="#526077", labelsize=10, width=1.1)
+        axes.margins(x=0.015)
+        axes.legend(loc="lower center", bbox_to_anchor=(0.5, 1.015), ncol=3,
+                    frameon=False, prop=chinese_font, fontsize=10, handlelength=1.4,
+                    columnspacing=1.0, borderaxespad=0.0)
         figure.savefig(
             chart_path,
             dpi=300,
             facecolor="white",
-            bbox_inches="tight",
+            bbox_inches="tight", pad_inches=0.05,
             metadata={"Software": "NeuroCIM", "Description": "High-resolution batch inference chart"},
         )
         return chart_path
@@ -2248,13 +2500,14 @@ class ErrorAwareTrainingWidget(QWidget):
         self.last_outcome: TrainingOutcome | None = None
         platform_root = self.project_root / "5_NeuroCIM_opt"
         layout = QVBoxLayout(self)
-        description = QLabel(
-            "网络类型和数据集自动继承最近一次成功推理；误差方法可从已生成的拟合结果中选择。"
-            "训练使用正负权重差分器件 LUT 前向计算和 STE 梯度，并比较训练前后的三种推理模式。"
-        )
-        description.setWordWrap(True)
-        layout.addWidget(description)
-        form = QFormLayout()
+        self.setProperty("usesIndependentColumnScroll", True)
+        left_card = QFrame(); left_card.setProperty("workCard", True)
+        left = QVBoxLayout(left_card); left.setContentsMargins(18, 16, 18, 16); left.setSpacing(10)
+        left_title = QLabel("再训练配置"); left_title.setProperty("sectionTitle", True); left.addWidget(left_title)
+        description = QLabel("自动继承最近一次成功推理的网络与数据集，并选择已拟合的误差模型。")
+        description.setProperty("sectionHint", True); description.setWordWrap(True); left.addWidget(description)
+        form = QFormLayout(); form.setSpacing(9)
+        advanced = CollapsiblePanel(); advanced_form = QFormLayout(); advanced_form.setSpacing(8)
         self.model_edit = QLineEdit("lenet5-mnist"); self.model_edit.setReadOnly(True)
         form.addRow("继承的网络模型", self.model_edit)
         self.dataset_name = QLineEdit("MNIST"); self.dataset_name.setReadOnly(True)
@@ -2262,12 +2515,16 @@ class ErrorAwareTrainingWidget(QWidget):
         self.checkpoint_edit = QLineEdit(str(
             self.project_root / "3_models/LeNet_5/chekpoint/lenet5_float.pt"
         )); self.checkpoint_edit.setReadOnly(require_workflow)
-        form.addRow("继承的 Checkpoint", self.checkpoint_edit)
+        advanced_form.addRow("继承的 Checkpoint", self.checkpoint_edit)
         self.auxiliary_edit = QLineEdit(str(
             self.project_root / "3_models/LeNet_5/chekpoint/quantization.json"
         )); self.auxiliary_edit.setReadOnly(require_workflow)
-        form.addRow("继承的辅助参数", self.auxiliary_edit)
+        advanced_form.addRow("继承的辅助参数", self.auxiliary_edit)
         self.error_model_combo = QComboBox(); form.addRow("误差建模方法", self.error_model_combo)
+        self.noise_combo = QComboBox(); _setup_noise_combo(self.noise_combo)
+        form.addRow("附加随机噪声", self.noise_combo)
+        self.adc_combo = QComboBox(); _setup_adc_combo(self.adc_combo)
+        form.addRow("ADC 量化", self.adc_combo)
         self.error_model_edit = QLineEdit(str(
             platform_root / "outputs" / "error_models" / "01_NMOS" / "error_model.json"
         ))
@@ -2278,7 +2535,7 @@ class ErrorAwareTrainingWidget(QWidget):
         error_button.clicked.connect(self._browse_error_model)
         error_button.setEnabled(not require_workflow)
         error_row.addWidget(error_button)
-        form.addRow("误差模型文件", error_row)
+        advanced_form.addRow("误差模型文件", error_row)
         self.dataset_edit = QLineEdit(str(data_root("mnist")))
         dataset_row = QHBoxLayout()
         dataset_row.addWidget(self.dataset_edit)
@@ -2286,7 +2543,7 @@ class ErrorAwareTrainingWidget(QWidget):
         dataset_button.clicked.connect(self._browse_dataset)
         dataset_button.setEnabled(not require_workflow)
         dataset_row.addWidget(dataset_button)
-        form.addRow("继承的数据集根目录", dataset_row)
+        advanced_form.addRow("继承的数据集根目录", dataset_row)
         self.lambda_spin = QDoubleSpinBox()
         self.lambda_spin.setRange(0.0, 1.0)
         self.lambda_spin.setSingleStep(0.05)
@@ -2295,38 +2552,38 @@ class ErrorAwareTrainingWidget(QWidget):
         self.epoch_spin = QSpinBox()
         self.epoch_spin.setRange(1, 100)
         self.epoch_spin.setValue(1)
-        form.addRow("Epoch 数", self.epoch_spin)
+        advanced_form.addRow("Epoch 数", self.epoch_spin)
         self.batch_spin = QSpinBox()
         self.batch_spin.setRange(1, 4096)
         self.batch_spin.setValue(128)
-        form.addRow("Batch Size", self.batch_spin)
+        advanced_form.addRow("Batch Size", self.batch_spin)
         self.learning_rate_spin = QDoubleSpinBox()
         self.learning_rate_spin.setDecimals(7)
         self.learning_rate_spin.setRange(0.0000001, 0.01)
         self.learning_rate_spin.setSingleStep(0.00001)
         self.learning_rate_spin.setValue(0.0001)
-        form.addRow("学习率", self.learning_rate_spin)
+        advanced_form.addRow("学习率", self.learning_rate_spin)
         self.sequence_length_spin = QSpinBox()
         self.sequence_length_spin.setRange(2, 1024)
         self.sequence_length_spin.setValue(64)
-        form.addRow("文本序列长度", self.sequence_length_spin)
+        advanced_form.addRow("文本序列长度", self.sequence_length_spin)
         self.gradient_accumulation_spin = QSpinBox()
         self.gradient_accumulation_spin.setRange(1, 128)
         self.gradient_accumulation_spin.setValue(1)
-        form.addRow("梯度累积批数", self.gradient_accumulation_spin)
+        advanced_form.addRow("梯度累积批数", self.gradient_accumulation_spin)
         self.max_train_batches_spin = QSpinBox()
         self.max_train_batches_spin.setRange(0, 1_000_000)
         self.max_train_batches_spin.setValue(0)
         self.max_train_batches_spin.setSpecialValueText("完整训练集")
-        form.addRow("每轮最大训练批数", self.max_train_batches_spin)
+        advanced_form.addRow("每轮最大训练批数", self.max_train_batches_spin)
         self.max_eval_batches_spin = QSpinBox()
         self.max_eval_batches_spin.setRange(0, 1_000_000)
         self.max_eval_batches_spin.setValue(0)
         self.max_eval_batches_spin.setSpecialValueText("完整评估集")
-        form.addRow("每种模式最大评估批数", self.max_eval_batches_spin)
+        advanced_form.addRow("每种模式最大评估批数", self.max_eval_batches_spin)
         self.device_combo = QComboBox()
         _setup_device_combo(self.device_combo)
-        form.addRow("运行设备", self.device_combo)
+        advanced_form.addRow("运行设备", self.device_combo)
         self.output_edit = QLineEdit(str(
             platform_root / "outputs" / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "training"
         ))
@@ -2335,8 +2592,9 @@ class ErrorAwareTrainingWidget(QWidget):
         output_button = QPushButton("选择目录")
         output_button.clicked.connect(self._browse_output)
         output_row.addWidget(output_button)
-        form.addRow("输出目录", output_row)
-        layout.addLayout(form)
+        advanced_form.addRow("输出目录", output_row)
+        left.addLayout(form)
+        advanced.content_layout.addLayout(advanced_form); left.addWidget(advanced)
         controls = QHBoxLayout()
         self.run_button = QPushButton("开始误差感知训练")
         self.run_button.clicked.connect(self.start_training)
@@ -2350,23 +2608,44 @@ class ErrorAwareTrainingWidget(QWidget):
         controls.addWidget(self.cancel_button)
         controls.addWidget(self.export_button)
         controls.addStretch()
-        layout.addLayout(controls)
+        left.addLayout(controls)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        layout.addWidget(self.progress)
+        left.addWidget(self.progress)
         self.summary = QLabel("尚未运行")
         self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        left.addWidget(self.summary)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(160)
+        left.addWidget(QLabel("训练日志")); left.addWidget(self.log)
+
+        right_card = QFrame(); right_card.setProperty("workCard", True)
+        right = QVBoxLayout(right_card); right.setContentsMargins(18, 16, 18, 16); right.setSpacing(10)
+        right_title = QLabel("训练指标与评估结果"); right_title.setProperty("sectionTitle", True); right.addWidget(right_title)
+        metrics = QHBoxLayout(); metrics.setSpacing(10)
+        before_card, self.before_accuracy_metric = _metric_card("训练前器件准确率")
+        after_card, self.after_accuracy_metric = _metric_card("训练后器件准确率")
+        gain_card, self.accuracy_gain_metric = _metric_card("准确率变化")
+        metrics.addWidget(before_card); metrics.addWidget(after_card); metrics.addWidget(gain_card)
+        right.addLayout(metrics)
         self.metrics_table = QTableWidget(0, 5)
         self.metrics_table.setHorizontalHeaderLabels(
             ["阶段", "模式", "Accuracy / Token Accuracy", "Loss", "Perplexity"]
         )
         _fit_result_table_height(self.metrics_table, max_visible_rows=8)
-        layout.addWidget(self.metrics_table)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumHeight(160)
-        layout.addWidget(self.log)
+        right.addWidget(self.metrics_table)
+        result_hint = QLabel("训练完成后，这里显示训练前后在浮点、理想差分和器件误差差分模式下的指标。")
+        result_hint.setProperty("sectionHint", True); result_hint.setWordWrap(True); right.addWidget(result_hint)
+        chart_group = QGroupBox("训练前后准确率对比")
+        chart_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        chart_group.setMaximumHeight(410)
+        chart_layout = QVBoxLayout(chart_group)
+        self.training_chart_label = ResponsivePixmapLabel("训练完成后显示准确率柱状图")
+        self.training_chart_label.setMinimumHeight(310)
+        chart_layout.addWidget(self.training_chart_label)
+        right.addWidget(chart_group)
+        self.left_scroll, self.right_scroll = _add_independent_columns(layout, left_card, right_card)
         if self.coordinator is not None:
             _fill_error_model_combo(self.error_model_combo, self.coordinator)
             self.error_model_combo.currentIndexChanged.connect(self._training_error_changed)
@@ -2478,6 +2757,7 @@ class ErrorAwareTrainingWidget(QWidget):
             self.output_edit.setText(path)
 
     def _request(self, output_dir: Path | None = None) -> TrainingRequest:
+        sigma, rho = self.noise_combo.currentData()
         return TrainingRequest(
             project_root=self.project_root,
             error_model_path=Path(self.error_model_edit.text().strip()),
@@ -2494,6 +2774,7 @@ class ErrorAwareTrainingWidget(QWidget):
             gradient_accumulation_steps=self.gradient_accumulation_spin.value(),
             max_train_batches=(self.max_train_batches_spin.value() or None),
             max_eval_batches=(self.max_eval_batches_spin.value() or None),
+            adc_bits=self.adc_combo.currentData(), noise_sigma=float(sigma), noise_rho=float(rho),
         )
 
     def start_training(self, output_dir: Path | None = None) -> None:
@@ -2558,6 +2839,11 @@ class ErrorAwareTrainingWidget(QWidget):
 
     def _training_succeeded(self, outcome: TrainingOutcome) -> None:
         self.last_outcome = outcome
+        before_device = float(outcome.evaluations["before"]["device_differential"]["accuracy"])
+        after_device = float(outcome.evaluations["after"]["device_differential"]["accuracy"])
+        self.before_accuracy_metric.setText(f"{before_device:.2%}")
+        self.after_accuracy_metric.setText(f"{after_device:.2%}")
+        self.accuracy_gain_metric.setText(f"{after_device - before_device:+.2%}")
         rows = []
         for stage in ("before", "after"):
             for mode, result in outcome.evaluations[stage].items():
@@ -2579,10 +2865,53 @@ class ErrorAwareTrainingWidget(QWidget):
         self.log.appendPlainText("Checkpoint：" + outcome.checkpoint_path)
         self.log.appendPlainText("训练历史：" + outcome.history_path)
         self.log.appendPlainText("结果：" + outcome.result_path)
+        chart_path = self._save_training_chart(outcome)
+        self.training_chart_label.set_image(chart_path)
+        self.log.appendPlainText("训练前后准确率柱状图：" + str(chart_path))
         self.progress.setValue(100)
         self.export_button.setEnabled(True)
         if self.coordinator is not None:
             self.coordinator.context.record_training(outcome.as_dict())
+
+    @staticmethod
+    def _save_training_chart(outcome: TrainingOutcome) -> Path:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from matplotlib.font_manager import FontProperties
+
+        result_path = Path(outcome.result_path).resolve()
+        chart_path = result_path.with_name("training_accuracy_comparison.png")
+        chart_path.parent.mkdir(parents=True, exist_ok=True)
+        font_path = Path(r"C:\Windows\Fonts\msyh.ttc")
+        chinese_font = FontProperties(fname=str(font_path)) if font_path.is_file() else None
+        modes = ("float", "ideal_differential", "device_differential")
+        labels = ("浮点模型", "理想差分", "器件误差差分")
+        before = [float(outcome.evaluations["before"][mode]["accuracy"]) * 100 for mode in modes]
+        after = [float(outcome.evaluations["after"][mode]["accuracy"]) * 100 for mode in modes]
+        positions = np.arange(len(modes))
+        width = 0.32
+
+        figure = Figure(figsize=(7.4, 3.6), constrained_layout=True, facecolor="#FFFFFF")
+        FigureCanvasAgg(figure)
+        axes = figure.add_subplot(111)
+        axes.set_facecolor("#FFFFFF")
+        axes.bar(positions - width / 2, before, width, label="训练前", color="#9AA9BC")
+        axes.bar(positions + width / 2, after, width, label="训练后", color="#347FD1")
+        axes.set_xticks(positions, labels, fontproperties=chinese_font)
+        axes.set_ylim(0, 102)
+        axes.set_ylabel("准确率（%）", fontproperties=chinese_font)
+        axes.set_title("训练前后准确率对比", loc="left", pad=7,
+                       fontproperties=chinese_font, fontsize=13, fontweight="bold")
+        axes.grid(axis="y", color="#D9E2EE", linewidth=1.1, alpha=0.85)
+        axes.set_axisbelow(True)
+        axes.spines[["top", "right"]].set_visible(False)
+        axes.spines[["left", "bottom"]].set_color("#9AAAC0")
+        axes.spines[["left", "bottom"]].set_linewidth(1.2)
+        axes.tick_params(colors="#526077", labelsize=10, width=1.1)
+        axes.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=2,
+                    frameon=False, prop=chinese_font, fontsize=10)
+        figure.savefig(chart_path, dpi=300, facecolor="white", bbox_inches="tight")
+        return chart_path
 
     def _training_failed(self, details: str) -> None:
         self.log.appendPlainText(details)
@@ -2643,7 +2972,7 @@ class PpaEvaluationWidget(QWidget):
 
         form = QFormLayout()
         self.model_combo = QComboBox()
-        self.model_combo.addItem("LeNet-5 / MNIST", "lenet5-mnist")
+        self.model_combo.addItem("LeNet-5", "lenet5-mnist")
         form.addRow("模型", self.model_combo)
         self.checkpoint_edit = QLineEdit(
             str(platform_root / "outputs" / "eat" / "01_NMOS" / "eat_checkpoint.pt")
@@ -2818,7 +3147,7 @@ class GPT2GenerationWidget(QWidget):
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
-        self.model_label = QLabel("GPT-2 Small / 文本提示词")
+        self.model_label = QLabel("GPT-2 Small")
         form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(model_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         form.addRow("GPT-2 Checkpoint", self.checkpoint_edit)
@@ -3027,7 +3356,7 @@ class GPT2BatchInferenceWidget(QWidget):
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
-        self.model_label = QLabel("GPT-2 Small / 文本提示词")
+        self.model_label = QLabel("GPT-2 Small")
         form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(checkpoint_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         self.tokenizer_edit = QLineEdit(str(checkpoint_root / "tokenizer")); self.tokenizer_edit.setReadOnly(True)
@@ -3235,7 +3564,7 @@ class WikiText2EvaluationWidget(QWidget):
         )
         note.setWordWrap(True); group_layout.addWidget(note)
         form = QFormLayout()
-        self.model_label = QLabel("GPT-2 Large / WikiText-2")
+        self.model_label = QLabel("GPT-2 Large")
         form.addRow("继承的模型", self.model_label)
         self.checkpoint_edit = QLineEdit(str(resource_root / "model.safetensors"))
         self.checkpoint_edit.setReadOnly(True); form.addRow("Checkpoint", self.checkpoint_edit)
@@ -3374,10 +3703,14 @@ class UnifiedSingleInferenceWidget(QWidget):
         super().__init__(parent)
         if coordinator is None:
             raise ValueError("Unified inference requires a workflow coordinator")
+        self.setProperty("usesIndependentColumnScroll", True)
         self.coordinator = coordinator
         layout = QVBoxLayout(self)
         self.selection = QLabel(); self.selection.setWordWrap(True); layout.addWidget(self.selection)
-        self.stack = QStackedWidget(); layout.addWidget(self.stack)
+        self.stack = QStackedWidget()
+        self.stack.setMinimumSize(0, 0)
+        self.stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        layout.addWidget(self.stack)
         self.image_widget = SingleInferenceWidget(
             project_root, coordinator=coordinator, require_workflow=require_workflow
         )
@@ -3411,10 +3744,14 @@ class UnifiedBatchInferenceWidget(QWidget):
         super().__init__(parent)
         if coordinator is None:
             raise ValueError("Unified inference requires a workflow coordinator")
+        self.setProperty("usesIndependentColumnScroll", True)
         self.coordinator = coordinator
         layout = QVBoxLayout(self)
         self.selection = QLabel(); self.selection.setWordWrap(True); layout.addWidget(self.selection)
-        self.stack = QStackedWidget(); layout.addWidget(self.stack)
+        self.stack = QStackedWidget()
+        self.stack.setMinimumSize(0, 0)
+        self.stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        layout.addWidget(self.stack)
         self.image_widget = BatchInferenceWidget(
             project_root, coordinator=coordinator, require_workflow=require_workflow
         )
@@ -3474,12 +3811,18 @@ class MainWindow(QMainWindow):
         self.analysis_tabs = QTabWidget(self.tabs)
         self.analysis_tabs.setObjectName("analysisTabs")
         self.analysis_tabs.setDocumentMode(True)
+        self.cell_fit_widget = CellFittingWidget(platform_root, coordinator=self.workflow)
+        self.mac_analysis_widget = MacAnalysisWidget(platform_root)
         self.analysis_tabs.addTab(
-            self._scrollable(CellFittingWidget(platform_root, coordinator=self.workflow), "器件误差建模", "导入器件测量 CSV，检查列映射并生成可供推理和训练选择的多种误差模型。"),
+            self._scrollable(self.cell_fit_widget, "器件误差建模", "导入器件测量 CSV，检查列映射并生成可供推理和训练选择的多种误差模型。"),
             "器件误差拟合",
         )
-        self.analysis_tabs.addTab(self._scrollable(MacAnalysisWidget(platform_root), "阵列 MAC 分析", "拟合并分析不同阵列规模、位宽和实验组下的 MAC 输出误差。"), "阵列 MAC 分析")
+        self.analysis_tabs.addTab(self._scrollable(self.mac_analysis_widget, "阵列 MAC 分析", "拟合并分析不同阵列规模、位宽和实验组下的 MAC 输出误差。"), "阵列 MAC 分析")
         self.analysis_tabs.tabBar().hide()
+        self.cell_fit_widget.fit_mode_requested.connect(self._set_analysis_fit_mode)
+        self.mac_analysis_widget.fit_mode_requested.connect(self._set_analysis_fit_mode)
+        self.analysis_tabs.currentChanged.connect(self._sync_analysis_fit_mode_buttons)
+        self._sync_analysis_fit_mode_buttons(0)
         self.tabs.addTab(self.analysis_tabs, "误差建模与阵列分析")
         self.tabs.addTab(
             self._scrollable(ModelCatalogWidget(platform_root.parent, coordinator=self.workflow), "模型与数据集", "统一选择后续单样本推理、批量推理和误差感知训练使用的模型数据集组合。"),
@@ -3516,56 +3859,194 @@ class MainWindow(QMainWindow):
         if CredentialStore.load():
             QTimer.singleShot(5000, lambda: self._check_for_updates(interactive=False))
 
+    def _set_analysis_fit_mode(self, index: int) -> None:
+        self.analysis_tabs.setCurrentIndex(index)
+        self._sync_analysis_fit_mode_buttons(index)
+
+    def _sync_analysis_fit_mode_buttons(self, index: int) -> None:
+        device_selected = index == 0
+        for widget in (self.cell_fit_widget, self.mac_analysis_widget):
+            widget.device_mode_button.setChecked(device_selected)
+            widget.array_mode_button.setChecked(not device_selected)
+
+    def _clear_runtime_caches(self) -> None:
+        import gc
+
+        from .inference_runtime import clear_lenet_inference_cache
+
+        clear_lenet_inference_cache()
+        QPixmapCache.clear()
+        gc.collect()
+        cuda_released = False
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                cuda_released = True
+        except Exception:
+            pass
+        detail = "推理模型、数据集和图片缓存已释放"
+        if cuda_released:
+            detail += "，CUDA 未使用缓存已释放"
+        detail += "；运行结果文件未删除。"
+        self.statusBar().showMessage(detail, 8000)
+        QMessageBox.information(self, "清空缓存", detail)
+
     def _build_navigation_shell(self) -> QWidget:
-        root = QWidget(); outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
-        top = QFrame(); top.setObjectName("topBar"); top.setFixedHeight(68)
-        top_layout = QHBoxLayout(top); top_layout.setContentsMargins(22, 8, 22, 8); top_layout.setSpacing(12)
-        mark = QLabel("D"); mark.setObjectName("brandMark"); mark.setAlignment(Qt.AlignmentFlag.AlignCenter); top_layout.addWidget(mark)
-        brand = QVBoxLayout(); brand.setSpacing(1)
-        title = QLabel("DRAM 存算仿真平台"); title.setObjectName("brandTitle")
-        subtitle = QLabel("NeuroCIM 器件感知 AI 仿真平台"); subtitle.setObjectName("brandSubtitle")
-        brand.addWidget(title); brand.addWidget(subtitle); top_layout.addLayout(brand); top_layout.addStretch()
-        device = "GPU 可用" if self._cuda_available() else "CPU 模式"
-        runtime = QLabel(f"●  {device}  ·  v{__version__}"); runtime.setObjectName("topStatus"); top_layout.addWidget(runtime)
-        output_button = QPushButton("运行记录"); output_button.setProperty("topTool", True); output_button.clicked.connect(self._open_run_records); top_layout.addWidget(output_button)
-        help_button = QPushButton("帮助"); help_button.setProperty("topTool", True); help_button.clicked.connect(self._show_help); top_layout.addWidget(help_button)
-        update_button = QPushButton("检查更新"); update_button.setProperty("topTool", True); update_button.clicked.connect(lambda: self._check_for_updates(interactive=True)); top_layout.addWidget(update_button)
+        root = QWidget()
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        top = QFrame()
+        top.setObjectName("topBar")
+        top.setFixedHeight(64)
+        top_layout = QHBoxLayout(top)
+        top_layout.setContentsMargins(22, 7, 22, 7)
+        top_layout.setSpacing(12)
+        mark = QLabel("D")
+        mark.setObjectName("brandMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        top_layout.addWidget(mark)
+        brand = QVBoxLayout()
+        brand.setSpacing(0)
+        title = QLabel("DRAM 存算仿真平台")
+        title.setObjectName("brandTitle")
+        subtitle = QLabel("DRAM-CIM Simulator")
+        subtitle.setObjectName("brandSubtitle")
+        brand.addWidget(title)
+        brand.addWidget(subtitle)
+        top_layout.addLayout(brand)
+        top_layout.addStretch()
+
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        self.navigation_buttons = []
+        for index, (_number, text) in enumerate(self.NAVIGATION):
+            button = QPushButton(text, root)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, value=index: self._show_navigation_page(value)
+            )
+            group.addButton(button)
+            self.navigation_buttons.append(button)
+
+        home_button = self.navigation_buttons[0]
+        home_button.setText("首页")
+        home_button.setProperty("topTool", True)
+        top_layout.addWidget(home_button)
+        output_button = QPushButton("运行日志")
+        output_button.setProperty("topTool", True)
+        output_button.clicked.connect(self._open_run_records)
+        top_layout.addWidget(output_button)
+        self.cache_button = QPushButton("清空缓存")
+        self.cache_button.setObjectName("clearCacheButton")
+        self.cache_button.setProperty("topTool", True)
+        self.cache_button.setToolTip("释放推理模型、数据集、图片以及未使用的 CUDA 缓存；不会删除结果文件")
+        self.cache_button.clicked.connect(self._clear_runtime_caches)
+        top_layout.addWidget(self.cache_button)
         outer.addWidget(top)
-        body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0)
-        side = QFrame(); side.setObjectName("sideBar"); side.setFixedWidth(226)
-        side_layout = QVBoxLayout(side); side_layout.setContentsMargins(14, 18, 14, 14); side_layout.setSpacing(5)
-        caption = QLabel("功能导航"); caption.setObjectName("navCaption"); side_layout.addWidget(caption)
-        group = QButtonGroup(self); group.setExclusive(True); self.navigation_buttons = []
-        for index, (number, text) in enumerate(self.NAVIGATION):
-            button = QPushButton(f"  {number}    {text}"); button.setProperty("nav", True); button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, value=index: self._show_navigation_page(value))
-            group.addButton(button); side_layout.addWidget(button); self.navigation_buttons.append(button)
-        side_layout.addStretch()
-        status = QFrame(); status.setObjectName("sideStatus"); status_layout = QVBoxLayout(status); status_layout.setContentsMargins(12, 10, 12, 10); status_layout.setSpacing(4)
-        ready = QLabel("●  系统资源状态"); ready.setStyleSheet("color:#13825F;font-weight:700")
-        self.sidebar_summary = QLabel(); self.sidebar_summary.setProperty("muted", True); self.sidebar_summary.setWordWrap(True)
-        status_layout.addWidget(ready); status_layout.addWidget(self.sidebar_summary); side_layout.addWidget(status)
-        body.addWidget(side); body.addWidget(self.shell_stack, 1); outer.addLayout(body, 1); return root
+
+        self.flow_bar = QFrame()
+        self.flow_bar.setObjectName("flowBar")
+        flow_layout = QHBoxLayout(self.flow_bar)
+        flow_layout.setContentsMargins(24, 10, 24, 10)
+        flow_layout.setSpacing(8)
+        flow_title = QLabel("仿真流程")
+        flow_title.setObjectName("flowTitle")
+        flow_layout.addWidget(flow_title)
+        for index, caption in ((1, "1  误差建模"), (3, "2  模型与数据集"), (5, "3  带误差批量推理"), (6, "4  误差感知再训练")):
+            button = self.navigation_buttons[index]
+            button.setText(caption)
+            button.setProperty("flowStep", True)
+            flow_layout.addWidget(button)
+        flow_layout.addStretch()
+        outer.addWidget(self.flow_bar)
+        outer.addWidget(self.shell_stack, 1)
+
+        self.sidebar_summary = QLabel(root)
+        self.sidebar_summary.hide()
+        return root
 
     def _build_home_page(self) -> QWidget:
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(28, 24, 28, 28); layout.setSpacing(16)
-        title = QLabel("功能总览"); title.setObjectName("homeTitle"); layout.addWidget(title)
-        subtitle = QLabel("集中查看当前实验配置，并按误差建模、模型选择、推理和训练流程继续工作。"); subtitle.setProperty("muted", True); subtitle.setWordWrap(True); layout.addWidget(subtitle)
-        hero = QFrame(); hero.setProperty("dashboardCard", True); hero_layout = QGridLayout(hero); hero_layout.setContentsMargins(20, 18, 20, 18); hero_layout.setSpacing(12)
-        heading = QLabel("当前实验工作区"); heading.setStyleSheet("font-weight:700;color:#26364D")
-        self.home_experiment = QLabel(); self.home_experiment.setObjectName("homeHero"); self.home_experiment.setWordWrap(True)
-        self.home_hint = QLabel(); self.home_hint.setProperty("muted", True); self.home_hint.setWordWrap(True)
-        continue_button = QPushButton("继续当前实验  →"); continue_button.setProperty("role", "primary"); continue_button.clicked.connect(lambda: self._show_navigation_page(4))
-        hero_layout.addWidget(heading, 0, 0, 1, 2); hero_layout.addWidget(self.home_experiment, 1, 0, 1, 2); hero_layout.addWidget(self.home_hint, 2, 0); hero_layout.addWidget(continue_button, 2, 1); hero_layout.setColumnStretch(0, 1); layout.addWidget(hero)
-        grid = QGridLayout(); grid.setSpacing(16)
-        entries = (("器件误差建模", "导入 CSV、映射测量列并生成原始、低阶和高阶误差 LUT。", 1), ("模型与数据集", "统一选择后续单样本推理、批量推理与训练使用的组合。", 3), ("带误差推理", "比较浮点、理想差分和器件误差差分的预测结果。", 4), ("误差感知训练", "使用器件 LUT 前向与 STE 反向微调，并比较训练前后指标。", 6))
-        for index, (name, description, target) in enumerate(entries):
-            card = QFrame(); card.setProperty("dashboardCard", True); card.setMinimumHeight(155); card_layout = QVBoxLayout(card); card_layout.setContentsMargins(18, 16, 18, 14); card_layout.setSpacing(8)
-            name_label = QLabel(name); name_label.setStyleSheet("font-size:14px;font-weight:700;color:#26364D")
-            detail = QLabel(description); detail.setProperty("muted", True); detail.setWordWrap(True)
-            button = QPushButton("进入模块  →"); button.setProperty("role", "primary"); button.clicked.connect(lambda _checked=False, value=target: self._show_navigation_page(value))
-            card_layout.addWidget(name_label); card_layout.addWidget(detail); card_layout.addStretch(); card_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignRight); grid.addWidget(card, index // 2, index % 2)
-        layout.addLayout(grid); layout.addStretch(); return page
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 30, 40, 36)
+        layout.setSpacing(18)
+        title = QLabel("功能入口")
+        title.setObjectName("homeTitle")
+        layout.addWidget(title)
+        subtitle = QLabel(
+            "请选择需要进入的模块。仿真模拟包含误差建模、带误差批量推理和误差感知再训练；单数据推理用于快速查看一个样本的结果。"
+        )
+        subtitle.setProperty("muted", True)
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        remembered = QFrame()
+        remembered.setObjectName("rememberedConfig")
+        remembered_layout = QVBoxLayout(remembered)
+        remembered_layout.setContentsMargins(14, 10, 14, 10)
+        self.home_experiment = QLabel()
+        self.home_experiment.setObjectName("homeHero")
+        self.home_experiment.setWordWrap(True)
+        self.home_hint = QLabel()
+        self.home_hint.setProperty("muted", True)
+        self.home_hint.setWordWrap(True)
+        remembered_layout.addWidget(self.home_experiment)
+        remembered_layout.addWidget(self.home_hint)
+        layout.addWidget(remembered)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(20)
+        entries = (
+            (
+                "仿真模拟",
+                "导入器件或阵列误差数据，完成多种误差模型拟合、带误差批量推理、误差感知再训练与结果导出。",
+                "误差建模  →  带误差推理  →  误差感知再训练",
+                1,
+            ),
+            (
+                "单数据推理",
+                "选择模型、数据集与待推理数据，展示输入图片或文本、预测结果、Top-5 置信度和推理耗时。",
+                "统一支持图像分类模型与 GPT 文本模型",
+                4,
+            ),
+        )
+        for column, (name, description, metadata, target) in enumerate(entries):
+            card = QFrame()
+            card.setProperty("entryCard", True)
+            card.setMinimumHeight(255)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(24, 22, 24, 20)
+            card_layout.setSpacing(12)
+            icon = QLabel("◫" if column == 0 else "◎")
+            icon.setObjectName("entryIcon")
+            name_label = QLabel(name)
+            name_label.setObjectName("entryTitle")
+            detail = QLabel(description)
+            detail.setProperty("muted", True)
+            detail.setWordWrap(True)
+            meta = QLabel(metadata)
+            meta.setObjectName("entryMeta")
+            meta.setWordWrap(True)
+            button = QPushButton(f"进入{name}")
+            button.setProperty("role", "primary")
+            button.clicked.connect(
+                lambda _checked=False, value=target: self._show_navigation_page(value)
+            )
+            card_layout.addWidget(icon)
+            card_layout.addWidget(name_label)
+            card_layout.addWidget(detail)
+            card_layout.addWidget(meta)
+            card_layout.addStretch()
+            card_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignRight)
+            grid.addWidget(card, 0, column)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+        layout.addStretch()
+        return page
 
     @staticmethod
     def _cuda_available() -> bool:
@@ -3578,6 +4059,11 @@ class MainWindow(QMainWindow):
     def _show_navigation_page(self, index: int) -> None:
         if not hasattr(self, "navigation_buttons"): return
         index = max(0, min(index, len(self.navigation_buttons) - 1)); self.navigation_buttons[index].setChecked(True)
+        if hasattr(self, "flow_bar"):
+            self.flow_bar.setVisible(index not in (0, 4))
+            if index in (0, 4) and hasattr(self, "advanced_navigation_panel"):
+                self.advanced_navigation_panel.hide()
+                self.advanced_flow_button.setChecked(False)
         if index == 0: self.shell_stack.setCurrentIndex(0)
         else:
             self.shell_stack.setCurrentIndex(1)
@@ -3719,7 +4205,9 @@ class MainWindow(QMainWindow):
             table.setShowGrid(True)
             table.verticalHeader().setDefaultSectionSize(30)
             table.horizontalHeader().setMinimumHeight(32)
-            table.horizontalHeader().setStretchLastSection(True)
+            table.horizontalHeader().setStretchLastSection(
+                not bool(table.property("compactColumns"))
+            )
 
     @staticmethod
     def _scrollable(page: QWidget, title: str | None = None, subtitle: str | None = None) -> QScrollArea:
@@ -3736,11 +4224,18 @@ class MainWindow(QMainWindow):
             heading = QLabel(title); heading.setObjectName("contentTitle"); content_layout.addWidget(heading)
         if subtitle:
             detail = QLabel(subtitle); detail.setObjectName("contentSubtitle"); detail.setWordWrap(True); content_layout.addWidget(detail)
-        content_layout.addWidget(page)
+        independent_columns = bool(page.property("usesIndependentColumnScroll"))
+        if independent_columns:
+            page.setMinimumSize(0, 0)
+            page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        content_layout.addWidget(page, 1 if independent_columns else 0)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if independent_columns else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         scroll.verticalScrollBar().setSingleStep(24)
         scroll.horizontalScrollBar().setSingleStep(24)
         scroll.setWidget(content)

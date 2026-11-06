@@ -84,6 +84,44 @@ class DifferentialLayerMixin:
         )
         self.ste = bool(ste)
         self.mac_chunk_size = int(mac_chunk_size)
+        self.adc_bits: int | None = None
+        self.noise_sigma = 0.0
+        self.noise_rho = 0.0
+        self.noise_seed = 0
+
+    def configure_nonidealities(
+        self, *, adc_bits: int | None = None, noise_sigma: float = 0.0,
+        noise_rho: float = 0.0, noise_seed: int = 0,
+    ) -> None:
+        if adc_bits is not None and not 2 <= int(adc_bits) <= 16:
+            raise ValueError("adc_bits must be None or an integer in [2, 16]")
+        if float(noise_sigma) < 0:
+            raise ValueError("noise_sigma must be non-negative")
+        if not 0 <= float(noise_rho) <= 1:
+            raise ValueError("noise_rho must be in [0, 1]")
+        self.adc_bits = None if adc_bits is None else int(adc_bits)
+        self.noise_sigma = float(noise_sigma)
+        self.noise_rho = float(noise_rho)
+        self.noise_seed = int(noise_seed)
+
+    def _apply_nonidealities(self, value: Tensor, full_scale: Tensor) -> Tensor:
+        """Apply signed ADC quantization and reproducible normalized device noise."""
+        scale = full_scale.to(value.device, value.dtype).clamp_min(torch.finfo(value.dtype).eps)
+        while scale.ndim < value.ndim:
+            scale = scale.unsqueeze(-1)
+        if self.adc_bits is not None:
+            qmax = float((1 << (self.adc_bits - 1)) - 1)
+            value = torch.round(torch.clamp(value / scale, -1.0, 1.0) * qmax) * scale / qmax
+        if self.noise_sigma > 0:
+            generator = torch.Generator(device=value.device)
+            generator.manual_seed(self.noise_seed)
+            independent = torch.randn(value.shape, generator=generator, device=value.device, dtype=value.dtype)
+            shared_shape = list(value.shape); shared_shape[1] = 1
+            shared = torch.randn(shared_shape, generator=generator, device=value.device, dtype=value.dtype)
+            noise = ((1.0 - self.noise_rho) ** 0.5 * independent
+                     + self.noise_rho ** 0.5 * shared)
+            value = value + self.noise_sigma * scale * noise
+        return value
 
     def _scale_for_output(self, dtype: torch.dtype, dimensions: int) -> Tensor:
         shape = [1, -1] + [1] * (dimensions - 2)
@@ -175,6 +213,11 @@ class DifferentialLinear(DifferentialLayerMixin, nn.Linear):
             self.input_scale.to(input.device, compute_dtype)
             * self.weight_scale.to(input.device, compute_dtype).view(1, -1)
         )
+        lut_peak = self.hardware_lut.abs().amax().to(input.device, compute_dtype)
+        full_scale = (self.input_scale.to(input.device, compute_dtype)
+                      * self.weight_scale.to(input.device, compute_dtype)
+                      * lut_peak * self.in_features).view(1, -1)
+        exact = self._apply_nonidealities(exact, full_scale)
         if self.bias is not None:
             exact = exact + self.bias.to(compute_dtype)
         exact = exact.to(input.dtype)
@@ -285,6 +328,11 @@ class DifferentialConv2d(DifferentialLayerMixin, nn.Conv2d):
             self.input_scale.to(input.device, compute_dtype)
             * w_scale_all.to(input.device, compute_dtype).view(1, -1, 1)
         )
+        lut_peak = self.hardware_lut.abs().amax().to(input.device, compute_dtype)
+        full_scale = (self.input_scale.to(input.device, compute_dtype)
+                      * w_scale_all.to(input.device, compute_dtype)
+                      * lut_peak * kernel_elements).view(1, -1, 1)
+        exact = self._apply_nonidealities(exact, full_scale)
         if self.bias is not None:
             exact = exact + self.bias.to(compute_dtype).view(1, -1, 1)
         exact = exact.to(input.dtype)
@@ -335,4 +383,19 @@ def adapt_module(
             parent_name, _, child_name = full_name.rpartition(".")
             parent = model.get_submodule(parent_name) if parent_name else model
             setattr(parent, child_name, replacement)
+    return model
+
+
+def configure_model_nonidealities(
+    model: nn.Module, *, adc_bits: int | None = None, noise_sigma: float = 0.0,
+    noise_rho: float = 0.0, noise_seed: int = 0,
+) -> nn.Module:
+    """Configure every differential layer without rebuilding cached models."""
+    modules = model.modules() if hasattr(model, "modules") else ()
+    for offset, module in enumerate(modules):
+        if isinstance(module, DifferentialLayerMixin):
+            module.configure_nonidealities(
+                adc_bits=adc_bits, noise_sigma=noise_sigma, noise_rho=noise_rho,
+                noise_seed=noise_seed + offset,
+            )
     return model

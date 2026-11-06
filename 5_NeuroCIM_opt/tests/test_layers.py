@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from neurocim_opt import DifferentialConv2d, DifferentialLinear, adapt_module
+from neurocim_opt.layers import configure_model_nonidealities
 
 
 def ideal_lut() -> torch.Tensor:
@@ -153,3 +154,24 @@ def test_adapt_module_requires_all_scales() -> None:
     model = nn.Sequential(nn.Linear(3, 2), nn.ReLU(), nn.Linear(2, 1))
     with pytest.raises(KeyError, match="2"):
         adapt_module(model, lut=ideal_lut(), input_scales={"0": 0.1})
+
+
+def test_adc_quantizes_differential_mac_output_and_noise_is_reproducible() -> None:
+    torch.manual_seed(11)
+    layer = DifferentialLinear(
+        5, 3, lut=ideal_lut(), input_scale=0.02,
+        weight_scale=torch.tensor([0.01, 0.012, 0.014]), bias=False,
+    )
+    sample = torch.tensor([[0.13, -0.27, 0.41, 0.08, -0.19]])
+    baseline = layer(sample)
+    configure_model_nonidealities(layer, adc_bits=4)
+    quantized = layer(sample)
+    assert torch.isfinite(quantized).all()
+    assert not torch.equal(quantized, baseline)
+    configure_model_nonidealities(
+        layer, adc_bits=8, noise_sigma=0.01, noise_rho=0.05, noise_seed=123,
+    )
+    first = layer(sample)
+    second = layer(sample)
+    assert torch.equal(first, second)
+    assert not torch.equal(first, quantized)

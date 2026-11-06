@@ -113,7 +113,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
     registry = ModelRegistry()
     registry.register(
         ModelSpec(
-            model_id="lenet5-mnist", display_name="LeNet-5 / MNIST",
+            model_id="lenet5-mnist", display_name="LeNet-5",
             task="image_classification", datasets=("mnist",),
             factory="lenet5.model:LeNet5",
             checkpoint=lenet_root / "chekpoint/lenet5_float.pt",
@@ -131,7 +131,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
     )
     vision_models = (
         (
-            "resnet8-mnist", "ResNet-8 / MNIST（手写数字识别）", "mnist", "resnet8_mnist",
+            "resnet8-mnist", "ResNet-8", "mnist", "resnet8_mnist",
             vision_root / "checkpoint/resnet8_mnist.pt",
             vision_root / "checkpoint/resnet8-mnist_input_scales.json",
             (1, 28, 28), mnist_classes, (0.1307,), (0.3081,),
@@ -140,7 +140,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             "b5130a0b3234d947dd0cbabb90f11631c1e25f23289c55cbc4a41b7ee0a986ed",
         ),
         (
-            "mobilenetv2-cifar10", "MobileNetV2 x1.0 / CIFAR-10（图像分类）", "cifar10",
+            "mobilenetv2-cifar10", "MobileNetV2 x1.0", "cifar10",
             "mobilenetv2_x1_0_cifar10",
             vision_root / "checkpoint/cifar10_mobilenetv2_x1_0-fe6a5b48.pt",
             vision_root / "checkpoint/mobilenetv2-cifar10_input_scales.json",
@@ -152,7 +152,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             "fe6a5b4808c9b1b7a440c02fa19a10dc3d8ea5c63e38381b2f60b1937958735e",
         ),
         (
-            "vgg11-bn-cifar10", "VGG11-BN / CIFAR-10（图像分类）", "cifar10", "vgg11_bn_cifar10",
+            "vgg11-bn-cifar10", "VGG11-BN", "cifar10", "vgg11_bn_cifar10",
             vision_root / "checkpoint/cifar10_vgg11_bn-eaeebf42.pt",
             vision_root / "checkpoint/vgg11-bn-cifar10_input_scales.json",
             (3, 32, 32), cifar10_classes,
@@ -163,7 +163,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             "eaeebf42370c92fdfbb5dbe8eba7c27d4eb7366a1dca0b5be435364ccdf54378",
         ),
         (
-            "squeezenet1_1-cifar10", "SqueezeNet 1.1 / CIFAR-10（图像分类）", "cifar10",
+            "squeezenet1_1-cifar10", "SqueezeNet 1.1", "cifar10",
             "squeezenet1_1_cifar10",
             vision_root / "checkpoint/squeezenet1_1_cifar10.pt",
             vision_root / "checkpoint/squeezenet1_1-cifar10_input_scales.json",
@@ -197,7 +197,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
         ))
     registry.register(
         ModelSpec(
-            model_id="resnet20-cifar10", display_name="ResNet-20 / CIFAR-10",
+            model_id="resnet20-cifar10", display_name="ResNet-20",
             task="image_classification", datasets=("cifar10",),
             factory="resnet20.model:resnet20",
             checkpoint=resnet_root / "checkpoint/resnet20_cifar10.pt",
@@ -216,7 +216,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
     )
     registry.register(
         ModelSpec(
-            model_id="bnn-mnist", display_name="Binary CNN / MNIST",
+            model_id="bnn-mnist", display_name="BNN (BinaryNet)",
             task="image_classification", datasets=("mnist",),
             factory="bnn.model:BinaryMNIST",
             checkpoint=bnn_root / "checkpoint/bnn_mnist.pt",
@@ -234,7 +234,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
     registry.register(
         ModelSpec(
             model_id="tinytransformer-cifar10",
-            display_name="TinyTransformer (CCT-7/3x1) / CIFAR-10",
+            display_name="TinyTransformer (CCT-7/3x1)",
             task="image_classification", datasets=("cifar10",),
             factory="tiny_transformer:cct_7_3x1_32",
             checkpoint=tiny_root / "checkpoint/cct_7_3x1_32_cifar10.pth",
@@ -253,7 +253,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
     )
     registry.register(
         ModelSpec(
-            model_id="gpt2-small", display_name="GPT-2 Small / Text Generation",
+            model_id="gpt2-small", display_name="GPT-2 Small",
             task="text_generation", datasets=("prompt_text",),
             factory="gpt2_cim:gpt2_small",
             checkpoint=gpt2_root / "checkpoint/gpt2_nanogpt.pt",
@@ -277,7 +277,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
     wikitext2_root = gpt2_large_root / "wikitext-2-raw-v1"
     registry.register(
         ModelSpec(
-            model_id="gpt2-large", display_name="GPT-2 Large / WikiText-2",
+            model_id="gpt2-large", display_name="GPT-2 Large",
             task="text_generation", datasets=("wikitext2",),
             factory="gpt2_cim:gpt2_large",
             checkpoint=gpt2_large_root / "model.safetensors",

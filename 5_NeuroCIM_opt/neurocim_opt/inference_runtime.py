@@ -284,15 +284,20 @@ def get_vision_zoo_inference_resources(
         import json
         import numpy as np
         import torch
+        from torch.utils.data import DataLoader
+        from torchvision import datasets, transforms
         from vision_zoo.checkpoint import load_checkpoint
-        from vision_zoo.data import create_loaders
+        from vision_zoo.data import CIFAR10_MEAN, CIFAR10_STD, MNIST_MEAN, MNIST_STD
         from vision_zoo.engine import calibrate_input_scales, differential_copy
         from vision_zoo.models import create_model
         from .error_model import HardwareErrorModel
 
-        calibration, _validation, test = create_loaders(
-            model_id, dataset_root, batch_size=16, eval_batch_size=16,
-            seed=42, num_workers=0, download=False,
+        is_cifar = model_id.endswith("cifar10")
+        mean, std = (CIFAR10_MEAN, CIFAR10_STD) if is_cifar else (MNIST_MEAN, MNIST_STD)
+        transform = transforms.Compose((transforms.ToTensor(), transforms.Normalize(mean, std)))
+        dataset_class = datasets.CIFAR10 if is_cifar else datasets.MNIST
+        test_dataset = dataset_class(
+            root=dataset_root, train=False, transform=transform, download=False
         )
         float_model = load_checkpoint(create_model(model_id), checkpoint_path)
         if input_scales_path is not None:
@@ -304,6 +309,12 @@ def get_vision_zoo_inference_resources(
                 )
             input_scales = {str(name): float(value) for name, value in input_scales.items()}
         else:
+            calibration_dataset = dataset_class(
+                root=dataset_root, train=True, transform=transform, download=False
+            )
+            calibration = DataLoader(
+                calibration_dataset, batch_size=16, shuffle=False, num_workers=0
+            )
             input_scales = calibrate_input_scales(
                 float_model, calibration, device=device_name, max_batches=1,
             )
@@ -316,7 +327,7 @@ def get_vision_zoo_inference_resources(
         for model in (float_model, ideal_model, device_model):
             model.eval().to(device)
         resources = RegisteredInferenceResources(
-            dataset=test.dataset, quantization=input_scales, device_lut=device_lut,
+            dataset=test_dataset, quantization=input_scales, device_lut=device_lut,
             float_model=float_model, ideal_model=ideal_model,
             device_model=device_model, device=device,
         )

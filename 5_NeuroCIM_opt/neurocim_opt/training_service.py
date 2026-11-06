@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+import gc
 import hashlib
 import json
 from pathlib import Path
@@ -41,6 +42,9 @@ class TrainingRequest:
     max_eval_batches: int | None = None
     sequence_length: int = 64
     gradient_accumulation_steps: int = 1
+    adc_bits: int | None = None
+    noise_sigma: float = 0.0
+    noise_rho: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -210,6 +214,10 @@ class ErrorAwareTrainingService:
             raise ValueError("sequence_length must be in [2, 1024]")
         if request.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be at least 1")
+        if request.adc_bits is not None and not 2 <= int(request.adc_bits) <= 16:
+            raise ValueError("adc_bits must be None or in [2, 16]")
+        if request.noise_sigma < 0 or not 0 <= request.noise_rho <= 1:
+            raise ValueError("noise_sigma must be non-negative and noise_rho must be in [0, 1]")
         if request.device not in {"auto", "cpu", "cuda"}:
             raise ValueError("device must be auto, cpu, or cuda")
         if request.device == "cuda" and not torch.cuda.is_available():
@@ -315,25 +323,53 @@ class ErrorAwareTrainingService:
         """Build loaders and model conversion functions for one registered model."""
         self._add_import_root(resources.model_root)
         state = _checkpoint_state(resources.checkpoint)
+        from .runtime_memory import memory_aware_batch_size
+        mib = 1024 ** 2
+        model_peak_bytes = {
+            # Small differential linear/conv graphs can safely use conventional
+            # batches; applying the multi-GiB estimate here previously reduced
+            # LeNet evaluation to batch=2 (5,000 test batches per mode).
+            "lenet5-mnist": (64 * mib, 64 * mib),
+            "bnn-mnist": (128 * mib, 128 * mib),
+            "resnet8-mnist": (1024 * mib, 1024 * mib),
+            # TinyTransformer trains only its compact differential head, while
+            # formal evaluation converts the complete network.
+            "tinytransformer-cifar10": (512 * mib, 3 * 1024 ** 3),
+            "resnet20-cifar10": (3 * 1024 ** 3, 3 * 1024 ** 3),
+            "mobilenetv2-cifar10": (3 * 1024 ** 3, 3 * 1024 ** 3),
+            "vgg11-bn-cifar10": (3 * 1024 ** 3, 3 * 1024 ** 3),
+            "squeezenet1_1-cifar10": (2 * 1024 ** 3, 2 * 1024 ** 3),
+        }
+        train_peak, eval_peak = model_peak_bytes.get(
+            resources.model_id, (2 * 1024 ** 3, 2 * 1024 ** 3)
+        )
+        memory_limited_train_batch, _memory_snapshot = memory_aware_batch_size(
+            request.batch_size, resources.device,
+            estimated_peak_bytes_per_sample=train_peak,
+        )
+        memory_limited_eval_batch, _ = memory_aware_batch_size(
+            request.batch_size, resources.device,
+            estimated_peak_bytes_per_sample=eval_peak,
+        )
         if resources.model_id == "tinytransformer-cifar10":
-            train_batch_size = min(request.batch_size, TINYTRANSFORMER_TRAIN_BATCH_LIMIT)
+            train_batch_size = min(memory_limited_train_batch, TINYTRANSFORMER_TRAIN_BATCH_LIMIT)
             eval_batch_size = min(
-                max(request.batch_size, TINYTRANSFORMER_TRAIN_BATCH_LIMIT),
+                memory_limited_eval_batch,
                 TINYTRANSFORMER_EVAL_BATCH_LIMIT,
             )
         elif resources.model_id in {
             "resnet8-mnist", "mobilenetv2-cifar10", "vgg11-bn-cifar10",
             "squeezenet1_1-cifar10",
         }:
-            train_batch_size = min(request.batch_size, VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT)
-            eval_batch_size = min(request.batch_size, VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT)
+            train_batch_size = min(memory_limited_train_batch, VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT)
+            eval_batch_size = min(memory_limited_eval_batch, VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT)
         else:
-            train_batch_size = request.batch_size
+            train_batch_size = memory_limited_train_batch
             # Differential LUT layers use substantially more temporary memory than
             # ordinary floating inference. Keep evaluation at or below the
             # requested batch size so lowering a job's batch size also resolves
             # CUDA OOM during the before/after full-test passes.
-            eval_batch_size = min(request.batch_size, 128)
+            eval_batch_size = min(memory_limited_eval_batch, 128)
 
         if resources.model_id == "lenet5-mnist":
             from lenet5.config import ExperimentConfig
@@ -344,7 +380,7 @@ class ErrorAwareTrainingService:
 
             config = ExperimentConfig(
                 dataset_root=resources.dataset_root, output_dir=Path(request.output_dir),
-                batch_size=request.batch_size, eval_batch_size=eval_batch_size,
+                batch_size=train_batch_size, eval_batch_size=eval_batch_size,
                 epochs=request.epochs, learning_rate=request.learning_rate,
                 device=str(resources.device), num_workers=0,
             )
@@ -368,7 +404,7 @@ class ErrorAwareTrainingService:
             from .layers import adapt_module
 
             loaders = create_loaders(
-                resources.dataset_root, request.batch_size, eval_batch_size,
+                resources.dataset_root, train_batch_size, eval_batch_size,
                 request.seed, num_workers=0,
             )
 
@@ -482,9 +518,19 @@ class ErrorAwareTrainingService:
         notify = progress or (lambda _percent, _message, _metrics=None: None)
         resources = self.validate(request)
         self._cancelled(cancel)
+        # Batch inference keeps three model variants in the shared runtime
+        # cache.  Training rebuilds its own models, so retaining those objects
+        # only consumes RAM/VRAM and can prevent CIFAR-10 from allocating its
+        # raw training array on memory-constrained Windows machines.
+        from .inference_runtime import clear_lenet_inference_cache
+        clear_lenet_inference_cache()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         if resources.model_id == "gpt2-small":
             return self._run_gpt2_small(request, resources, notify, cancel)
         from .error_model import HardwareErrorModel
+        from .runtime_memory import is_cuda_oom, release_cuda_memory
 
         started = perf_counter()
         output = Path(request.output_dir).expanduser().resolve()
@@ -493,9 +539,43 @@ class ErrorAwareTrainingService:
             loaders, base, training_differential, evaluation_differential, initial_state,
         ) = self._prepare(resources, request)
         train_loader, validation_loader, test_loader = loaders
+        planned_train_batches = len(train_loader)
+        if request.max_train_batches is not None:
+            planned_train_batches = min(planned_train_batches, request.max_train_batches)
+        planned_eval_batches = len(test_loader)
+        planned_validation_batches = len(validation_loader)
+        if request.max_eval_batches is not None:
+            planned_eval_batches = min(planned_eval_batches, request.max_eval_batches)
+            planned_validation_batches = min(
+                planned_validation_batches, request.max_eval_batches
+            )
+        notify(
+            0,
+            "训练计划："
+            f"每轮训练 {planned_train_batches} batches（batch={train_loader.batch_size}）；"
+            f"每种测试模式 {planned_eval_batches} batches（batch={test_loader.batch_size}），"
+            "训练前后共 6 次测试；"
+            f"每轮验证 {planned_validation_batches} batches",
+            {
+                "train_batches_per_epoch": planned_train_batches,
+                "train_batch_size": train_loader.batch_size,
+                "eval_batches_per_mode": planned_eval_batches,
+                "eval_batch_size": test_loader.batch_size,
+            },
+        )
         error_model = HardwareErrorModel.load(resources.error_model)
         ideal_lut = error_model.effective_lut(0.0)
         device_lut = error_model.effective_lut(request.error_strength)
+        from .layers import configure_model_nonidealities
+
+        def ideal_nonidealities(model):
+            return configure_model_nonidealities(model, adc_bits=request.adc_bits, noise_seed=request.seed)
+
+        def device_nonidealities(model):
+            return configure_model_nonidealities(
+                model, adc_bits=request.adc_bits, noise_sigma=request.noise_sigma,
+                noise_rho=request.noise_rho, noise_seed=request.seed,
+            )
 
         notify(1, f"Evaluating {resources.model_id} baseline", None)
         def evaluate_with_progress(
@@ -512,18 +592,18 @@ class ErrorAwareTrainingService:
         before = {
             "float": evaluate_with_progress(base(), test_loader, "float", "baseline float", 1, 3),
             "ideal_differential": evaluate_with_progress(
-                evaluation_differential(base(), ideal_lut, False), test_loader,
+                ideal_nonidealities(evaluation_differential(base(), ideal_lut, False)), test_loader,
                 "ideal_differential",
                 "baseline ideal differential", 3, 6,
             ),
             "device_differential": evaluate_with_progress(
-                evaluation_differential(base(), device_lut, False), test_loader,
+                device_nonidealities(evaluation_differential(base(), device_lut, False)), test_loader,
                 "device_differential",
                 "baseline device differential", 6, 9,
             ),
         }
 
-        model = training_differential(base(), device_lut, True).to(resources.device)
+        model = device_nonidealities(training_differential(base(), device_lut, True)).to(resources.device)
         training_initial_state = deepcopy(model.state_dict())
         trainable_names = {
             name for name, parameter in model.named_parameters() if parameter.requires_grad
@@ -553,16 +633,40 @@ class ErrorAwareTrainingService:
                 self._cancelled(cancel)
                 inputs = inputs.to(resources.device)
                 targets = targets.to(resources.device)
-                optimizer.zero_grad(set_to_none=True)
-                logits = model(inputs)
-                loss = criterion(logits, targets)
-                if not torch.isfinite(loss):
-                    raise RuntimeError("Non-finite loss in error-aware training")
-                loss.backward()
-                optimizer.step()
                 count = targets.numel()
-                total_loss += float(loss.detach()) * count
-                correct += int((logits.argmax(1) == targets).sum())
+                micro_batch = count
+                while True:
+                    optimizer.zero_grad(set_to_none=True)
+                    batch_loss = 0.0
+                    batch_correct = 0
+                    try:
+                        for micro_start in range(0, count, micro_batch):
+                            micro_stop = min(micro_start + micro_batch, count)
+                            micro_inputs = inputs[micro_start:micro_stop]
+                            micro_targets = targets[micro_start:micro_stop]
+                            logits = model(micro_inputs)
+                            loss = criterion(logits, micro_targets)
+                            if not torch.isfinite(loss):
+                                raise RuntimeError("Non-finite loss in error-aware training")
+                            micro_count = micro_targets.numel()
+                            (loss * (micro_count / count)).backward()
+                            batch_loss += float(loss.detach()) * micro_count
+                            batch_correct += int((logits.argmax(1) == micro_targets).sum())
+                        optimizer.step()
+                        break
+                    except BaseException as exc:
+                        optimizer.zero_grad(set_to_none=True)
+                        if (resources.device.type != "cuda" or not is_cuda_oom(exc)
+                                or micro_batch <= 1):
+                            raise
+                        micro_batch = max(1, micro_batch // 2)
+                        release_cuda_memory()
+                        notify(
+                            10 + round(65 * completed_batches / max(total_batches, 1)),
+                            f"显存动态调整：训练 micro-batch 降为 {micro_batch}", None,
+                        )
+                total_loss += batch_loss
+                correct += batch_correct
                 samples += count
                 completed_batches += 1
                 if completed_batches == 1 or completed_batches % 20 == 0:
@@ -610,11 +714,11 @@ class ErrorAwareTrainingService:
                 trained(), test_loader, "float", "trained float", 78, 85,
             ),
             "ideal_differential": evaluate_with_progress(
-                trained(ideal_lut), test_loader, "ideal_differential",
+                ideal_nonidealities(trained(ideal_lut)), test_loader, "ideal_differential",
                 "trained ideal differential", 85, 92,
             ),
             "device_differential": evaluate_with_progress(
-                trained(device_lut), test_loader, "device_differential",
+                device_nonidealities(trained(device_lut)), test_loader, "device_differential",
                 "trained device differential", 92, 99,
             ),
         }
@@ -782,11 +886,18 @@ class ErrorAwareTrainingService:
                 for name, value in state.items():
                     parameters[name].copy_(value.to(parameters[name].device, parameters[name].dtype))
 
-        def differential_model(lut, *, ste: bool, trained=None):
+        def differential_model(lut, *, ste: bool, trained=None, device_noise: bool = False):
             model = base_model()
             apply_trainable_state(model, trained)
             configure_differential_heads(
                 model, lut, scales, ste=ste, layer_names=layer_names,
+            )
+            from .layers import configure_model_nonidealities
+            configure_model_nonidealities(
+                model, adc_bits=request.adc_bits,
+                noise_sigma=request.noise_sigma if device_noise else 0.0,
+                noise_rho=request.noise_rho if device_noise else 0.0,
+                noise_seed=request.seed,
             )
             return model
 
@@ -850,7 +961,7 @@ class ErrorAwareTrainingService:
             baseline_ideal, test_loader, "ideal_differential", "baseline ideal differential", 3, 6,
         )
         del baseline_ideal
-        baseline_device = differential_model(device_lut, ste=False)
+        baseline_device = differential_model(device_lut, ste=False, device_noise=True)
         before_device = evaluate(
             baseline_device, test_loader, "device_differential", "baseline device differential", 6, 9,
         )
@@ -861,7 +972,7 @@ class ErrorAwareTrainingService:
             "device_differential": before_device,
         }
 
-        model = differential_model(device_lut, ste=True).to(resources.device)
+        model = differential_model(device_lut, ste=True, device_noise=True).to(resources.device)
         trainable_names = set_training_scope(model)
         initial_trainable = {
             name: parameter.detach().cpu().clone()
@@ -946,7 +1057,9 @@ class ErrorAwareTrainingService:
             trained_ideal, test_loader, "ideal_differential", "trained ideal differential", 85, 92,
         )
         del trained_ideal
-        trained_device = differential_model(device_lut, ste=False, trained=best_state)
+        trained_device = differential_model(
+            device_lut, ste=False, trained=best_state, device_noise=True
+        )
         after_device = evaluate(
             trained_device, test_loader, "device_differential", "trained device differential", 92, 99,
         )
@@ -1033,6 +1146,8 @@ class ErrorAwareTrainingService:
         max_batches: int | None = None,
         batch_progress: Callable[[int, int], None] | None = None,
     ) -> dict:
+        from .runtime_memory import is_cuda_oom, release_cuda_memory
+
         model.eval().to(device)
         criterion = nn.CrossEntropyLoss(reduction="sum")
         loss = 0.0
@@ -1045,13 +1160,28 @@ class ErrorAwareTrainingService:
                     break
                 self._cancelled(cancel)
                 inputs, targets = inputs.to(device), targets.to(device)
-                logits = model(inputs)
-                loss += float(criterion(logits, targets))
-                predictions = logits.argmax(1)
-                correct += int((predictions == targets).sum())
-                indices = (targets * 10 + predictions).detach().cpu()
-                confusion += torch.bincount(indices, minlength=100).reshape(10, 10)
-                samples += targets.numel()
+                micro_batch = targets.numel()
+                micro_start = 0
+                while micro_start < targets.numel():
+                    micro_stop = min(micro_start + micro_batch, targets.numel())
+                    micro_inputs = inputs[micro_start:micro_stop]
+                    micro_targets = targets[micro_start:micro_stop]
+                    try:
+                        logits = model(micro_inputs)
+                    except BaseException as exc:
+                        if (torch.device(device).type != "cuda" or not is_cuda_oom(exc)
+                                or micro_batch <= 1):
+                            raise
+                        micro_batch = max(1, micro_batch // 2)
+                        release_cuda_memory()
+                        continue
+                    loss += float(criterion(logits, micro_targets))
+                    predictions = logits.argmax(1)
+                    correct += int((predictions == micro_targets).sum())
+                    indices = (micro_targets * 10 + predictions).detach().cpu()
+                    confusion += torch.bincount(indices, minlength=100).reshape(10, 10)
+                    samples += micro_targets.numel()
+                    micro_start = micro_stop
                 completed = batch_index + 1
                 if batch_progress and (completed == 1 or completed % 10 == 0 or completed == total_batches):
                     batch_progress(completed, total_batches)

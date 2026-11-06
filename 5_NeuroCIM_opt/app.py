@@ -1,6 +1,11 @@
 from pathlib import Path
 import json
+import os
 import sys
+
+# Differential LUT layers create large transient CUDA tensors.  Expandable
+# segments reduce allocator fragmentation on long-lived Windows GUI sessions.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 if __name__ == "__main__":
     platform_root = (

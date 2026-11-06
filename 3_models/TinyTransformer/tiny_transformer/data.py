@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from pathlib import Path
 import random
 
@@ -31,7 +32,9 @@ def create_cifar10_loaders(
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     root = Path(root).expanduser().resolve()
     augmented = datasets.CIFAR10(root=root, train=True, transform=_transform(True), download=download)
-    evaluation = datasets.CIFAR10(root=root, train=True, transform=_transform(False), download=False)
+    # Share the 146 MiB raw training array; only the transform differs.
+    evaluation = copy(augmented)
+    evaluation.transform = _transform(False)
     indices = torch.randperm(len(augmented), generator=torch.Generator().manual_seed(seed)).tolist()
     validation_indices, training_indices = indices[:validation_size], indices[validation_size:]
     test = datasets.CIFAR10(root=root, train=False, transform=_transform(False), download=False)

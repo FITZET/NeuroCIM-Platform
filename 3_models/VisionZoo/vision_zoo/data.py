@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from pathlib import Path
 import random
 
@@ -61,7 +62,9 @@ def create_cifar10_loaders(
         transforms.ToTensor(), transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
     ))
     augmented = datasets.CIFAR10(root, train=True, transform=training_transform, download=download)
-    evaluation = datasets.CIFAR10(root, train=True, transform=evaluation_transform, download=False)
+    # Keep two transform views without allocating a second full CIFAR array.
+    evaluation = copy(augmented)
+    evaluation.transform = evaluation_transform
     test = datasets.CIFAR10(root, train=False, transform=evaluation_transform, download=False)
     training, validation = _split_indices(len(augmented), validation_size, seed)
     common = {"num_workers": num_workers, "worker_init_fn": _seed_worker}

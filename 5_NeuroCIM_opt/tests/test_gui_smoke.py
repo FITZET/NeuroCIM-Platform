@@ -56,6 +56,8 @@ def test_main_window_shows_live_model_catalog() -> None:
     application = QApplication.instance() or QApplication([])
     window = MainWindow(ROOT)
     assert len(window.navigation_buttons) == 7
+    assert window.cache_button.text() == "清空缓存"
+    assert "不会删除结果文件" in window.cache_button.toolTip()
     assert window.shell_stack.currentWidget() is window.home_page
     # The redesigned window wraps the established business-page tab container
     # in a top bar/sidebar shell.  Keep asserting the same page ownership via
@@ -90,15 +92,22 @@ def test_main_window_shows_live_model_catalog() -> None:
     window.close()
 
 
-def test_main_pages_scroll_when_window_height_is_reduced() -> None:
+def test_main_pages_use_independent_2_to_3_column_scrolls() -> None:
     application = QApplication.instance() or QApplication([])
     window = MainWindow(ROOT)
     window.resize(760, 430)
     window.show()
+    window._show_navigation_page(5)
     application.processEvents()
-    scroll = window.tabs.widget(3)
-    assert isinstance(scroll, QScrollArea)
-    assert scroll.verticalScrollBar().maximum() > 0
+    page_scroll = window.tabs.widget(3)
+    assert isinstance(page_scroll, QScrollArea)
+    left_scroll = page_scroll.findChild(QScrollArea, "leftColumnScroll")
+    right_scroll = page_scroll.findChild(QScrollArea, "rightColumnScroll")
+    assert left_scroll is not None and right_scroll is not None
+    assert left_scroll.verticalScrollBar() is not right_scroll.verticalScrollBar()
+    assert left_scroll.verticalScrollBar().maximum() > 0
+    assert page_scroll.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert 0.58 < left_scroll.width() / right_scroll.width() < 0.75
     window.close()
 
 
@@ -134,7 +143,7 @@ def test_combo_boxes_ignore_wheel_and_open_from_the_full_control() -> None:
 def test_single_inference_progress_is_directly_below_run_controls() -> None:
     application = QApplication.instance() or QApplication([])
     widget = SingleInferenceWidget(ROOT.parent)
-    layout = widget.layout()
+    layout = widget.run_button.parentWidget().layout()
     controls_index = next(
         index for index in range(layout.count())
         if layout.itemAt(index).layout() is not None
@@ -153,7 +162,7 @@ def test_requested_progress_and_result_panel_layouts() -> None:
     batch = BatchInferenceWidget(ROOT.parent)
 
     for widget, button in ((cell, cell.fit_button), (training, training.run_button)):
-        layout = widget.layout()
+        layout = button.parentWidget().layout()
         controls_index = next(
             index for index in range(layout.count())
             if layout.itemAt(index).layout() is not None
@@ -163,9 +172,25 @@ def test_requested_progress_and_result_panel_layouts() -> None:
         assert layout.indexOf(widget.progress) < layout.indexOf(widget.summary)
 
     assert single.log.maximumHeight() == 100
-    assert batch.chart_scroll.maximumHeight() == 350
+    assert batch.chart_scroll.maximumHeight() == 365
     assert batch.chart_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     cell.close(); training.close(); single.close(); batch.close()
+
+
+def test_fit_mode_highlight_tracks_the_visible_page() -> None:
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(ROOT)
+    window._set_analysis_fit_mode(1)
+    application.processEvents()
+    assert window.analysis_tabs.currentIndex() == 1
+    assert window.mac_analysis_widget.array_mode_button.isChecked()
+    assert not window.mac_analysis_widget.device_mode_button.isChecked()
+    window._set_analysis_fit_mode(0)
+    application.processEvents()
+    assert window.analysis_tabs.currentIndex() == 0
+    assert window.cell_fit_widget.device_mode_button.isChecked()
+    assert not window.cell_fit_widget.array_mode_button.isChecked()
+    window.close()
 
 
 def test_catalog_selection_drives_single_and_batch_task_views(tmp_path: Path) -> None:

@@ -26,15 +26,21 @@ def apply_paper_style() -> None:
         {
             "font.family": "sans-serif",
             "font.sans-serif": ["Microsoft YaHei", "SimHei", "Arial", "DejaVu Sans"],
-            "font.size": 8,
-            "axes.labelsize": 9,
-            "axes.titlesize": 9,
-            "axes.linewidth": 0.8,
+            "font.size": 11,
+            "axes.labelsize": 12,
+            "axes.titlesize": 13,
+            "axes.titleweight": "semibold",
+            "axes.linewidth": 1.2,
+            "lines.linewidth": 1.8,
             "xtick.direction": "in",
             "ytick.direction": "in",
-            "xtick.major.width": 0.7,
-            "ytick.major.width": 0.7,
-            "legend.fontsize": 7,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "xtick.major.width": 1.1,
+            "ytick.major.width": 1.1,
+            "xtick.major.size": 4.5,
+            "ytick.major.size": 4.5,
+            "legend.fontsize": 10,
             "figure.dpi": 120,
             "savefig.bbox": "tight",
             "savefig.transparent": False,
@@ -45,7 +51,10 @@ def apply_paper_style() -> None:
 
 
 def _save(fig: plt.Figure, path: Path, config: FittingConfig) -> Path:
-    fig.savefig(path, dpi=config.plot_dpi, facecolor="white")
+    fig.savefig(
+        path, dpi=config.plot_dpi, facecolor="white",
+        bbox_inches="tight", pad_inches=0.04,
+    )
     plt.close(fig)
     return path
 
@@ -58,7 +67,7 @@ def plot_surface_overview(result: FittingResult, output_dir: Path, config: Fitti
     fitted_frame["fit"] = result.fits["full_surface"].predicted
     fitted = fitted_frame.pivot(index="W", columns="X", values="fit").reindex(index=range(levels), columns=range(levels)).to_numpy(float)
     residual = measured - fitted
-    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.25), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(8.4, 2.75), constrained_layout=True)
     images = [measured, fitted, residual]
     titles = ["(a) Measured response", "(b) Bilinear fit", "(c) Residual"]
     cmaps = ["viridis", "viridis", "RdBu_r"]
@@ -72,7 +81,7 @@ def plot_surface_overview(result: FittingResult, output_dir: Path, config: Fitti
         ax.set_xlabel("Input code, X")
         ax.set_ylabel("Weight code, W")
         colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
-        colorbar.ax.tick_params(labelsize=7)
+        colorbar.ax.tick_params(labelsize=9, width=1.0)
     return _save(fig, output_dir / f"surface_overview.{config.image_format}", config)
 
 
@@ -80,14 +89,14 @@ def plot_fit_quality(result: FittingResult, output_dir: Path, config: FittingCon
     fit = result.fits["full_surface"]
     actual = result.dataset.frame["output"].to_numpy(float)
     step = max(1, len(actual) // 8000)
-    fig, axes = plt.subplots(1, 2, figsize=(5.1, 2.25), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(8.0, 2.75), constrained_layout=True)
     axes[0].scatter(actual[::step], fit.predicted[::step], s=3, alpha=0.35, color=PAPER_COLORS["blue"], rasterized=True)
     low, high = min(actual.min(), fit.predicted.min()), max(actual.max(), fit.predicted.max())
-    axes[0].plot([low, high], [low, high], color=PAPER_COLORS["red"], lw=1, label="Ideal agreement")
+    axes[0].plot([low, high], [low, high], color=PAPER_COLORS["red"], lw=1.8, label="Ideal agreement")
     axes[0].set(xlabel="Measured output", ylabel="Fitted output", title=f"(a) Fit quality ($R^2$ = {fit.metrics.r2:.5f})")
     axes[0].legend(frameon=False)
     axes[1].hist(fit.residual, bins=60, density=True, color=PAPER_COLORS["blue"], alpha=0.85, edgecolor="none")
-    axes[1].axvline(0, color=PAPER_COLORS["red"], lw=1)
+    axes[1].axvline(0, color=PAPER_COLORS["red"], lw=1.8)
     axes[1].set(xlabel="Residual", ylabel="Probability density", title="(b) Residual distribution")
     axes[1].yaxis.set_major_locator(MaxNLocator(4))
     return _save(fig, output_dir / f"fit_quality.{config.image_format}", config)
@@ -113,7 +122,7 @@ def plot_ideal_product_vs_device(result: FittingResult, output_dir: Path, config
         ylabel = "Actual output code"
         equation = rf"$Y={slope_plot:.6f}(XW)+{intercept_plot:.3e}$"
 
-    fig, ax = plt.subplots(figsize=(3.55, 2.75), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(8.0, 3.05), constrained_layout=True)
     ax.scatter(
         product,
         measured_plot,
@@ -130,7 +139,7 @@ def plot_ideal_product_vs_device(result: FittingResult, output_dir: Path, config
         x_line,
         intercept_plot + slope_plot * x_line,
         color=PAPER_COLORS["red"],
-        lw=1.4,
+        lw=2.0,
         label="Least-squares fit",
     )
     ax.text(
@@ -140,7 +149,7 @@ def plot_ideal_product_vs_device(result: FittingResult, output_dir: Path, config
         transform=ax.transAxes,
         ha="left",
         va="top",
-        fontsize=7.5,
+        fontsize=10.5,
         bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#BBBBBB", "alpha": 0.9},
     )
     ax.set(
@@ -158,12 +167,12 @@ def plot_transfer_slices(result: FittingResult, output_dir: Path, config: Fittin
     frame = result.dataset.frame.copy()
     frame["fit"] = result.fits["full_surface"].predicted
     selected_w = tuple(np.unique(np.rint(np.linspace(0, result.dataset.code_max, 5)).astype(int)))
-    fig, ax = plt.subplots(figsize=(3.5, 2.55), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(8.0, 3.0), constrained_layout=True)
     colors = plt.cm.viridis(np.linspace(0.08, 0.92, len(selected_w)))
     for weight, color in zip(selected_w, colors):
         subset = frame[frame["W"] == weight].sort_values("X")
-        ax.plot(subset["X"], subset["output"], color=color, lw=1.25, label=f"W = {weight}")
-        ax.plot(subset["X"], subset["fit"], color=color, lw=0.8, ls="--")
+        ax.plot(subset["X"], subset["output"], color=color, lw=2.0, label=f"W = {weight}")
+        ax.plot(subset["X"], subset["fit"], color=color, lw=1.4, ls="--")
     ax.set(xlabel="Input code, X", ylabel="Output response", title="Measured (solid) and fitted (dashed) transfer curves")
     ax.legend(frameon=False, ncol=2)
     ax.spines[["top", "right"]].set_visible(False)
@@ -174,13 +183,13 @@ def plot_lut_error(result: FittingResult, output_dir: Path, config: FittingConfi
     ideal = np.multiply.outer(np.arange(256), np.arange(256)).T
     error = result.lut.astype(float) - ideal
     bound = max(1.0, float(np.max(np.abs(error))))
-    fig, axes = plt.subplots(1, 2, figsize=(5.1, 2.25), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(8.0, 2.75), constrained_layout=True)
     image = axes[0].imshow(error, origin="lower", extent=(0, 255, 0, 255), cmap="RdBu_r", norm=TwoSlopeNorm(vmin=-bound, vcenter=0, vmax=bound))
     axes[0].set(xlabel="Input code, X", ylabel="Weight code, W", title="(a) Hardware LUT error")
     fig.colorbar(image, ax=axes[0], fraction=0.046, pad=0.03, label="Product-code error")
     for weight, color in zip((64, 128, 192, 255), plt.cm.viridis(np.linspace(0.1, 0.9, 4))):
-        axes[1].plot(np.arange(256), error[weight], lw=1, color=color, label=f"W = {weight}")
-    axes[1].axhline(0, color="black", lw=0.7)
+        axes[1].plot(np.arange(256), error[weight], lw=1.7, color=color, label=f"W = {weight}")
+    axes[1].axhline(0, color="black", lw=1.2)
     axes[1].set(xlabel="Input code, X", ylabel="Product-code error", title="(b) Error slices")
     axes[1].legend(frameon=False)
     axes[1].spines[["top", "right"]].set_visible(False)
@@ -188,13 +197,13 @@ def plot_lut_error(result: FittingResult, output_dir: Path, config: FittingConfi
 
 
 def _normalized_axis(result: FittingResult, title: str) -> tuple[plt.Figure, plt.Axes]:
-    fig, ax = plt.subplots(figsize=(4.4, 3.6), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(8.0, 3.15), constrained_layout=True)
     ax.set(
         xlim=(-0.03, 1.03), ylim=(-0.05, 1.08),
         xlabel=r"Normalized ideal product, $p=XW/X_{max}^2$",
         ylabel="Normalized output", title=f"{result.dataset.name}: {title}",
     )
-    ax.grid(True, color="#D9DDE3", linewidth=0.6, alpha=0.8)
+    ax.grid(True, color="#D9DDE3", linewidth=1.0, alpha=0.8)
     return fig, ax
 
 
@@ -223,9 +232,9 @@ def plot_normalized_linear(result: FittingResult, output_dir: Path, config: Fitt
                color=PAPER_COLORS["blue"], edgecolors="none", rasterized=True,
                label="Normalized measured output")
     line_x = np.linspace(0, 1, 500)
-    ax.plot(line_x, slope * line_x + intercept, color=PAPER_COLORS["red"], lw=1.5,
+    ax.plot(line_x, slope * line_x + intercept, color=PAPER_COLORS["red"], lw=2.2,
             label=rf"Fit: $T={slope:.4f}p{intercept:+.4f}$")
-    ax.plot(line_x, line_x, "--", color="#202124", lw=1, label="Ideal y=x")
+    ax.plot(line_x, line_x, "--", color="#202124", lw=1.6, label="Ideal y=x")
     ax.legend(loc="upper left", frameon=False)
     _metric_box(ax, f"$R^2$ = {fit.metrics.r2:.6f}\nRMSE = {fit.metrics.rmse*100:.4f}% FS\nNL = {fit.metrics.nl_percent_fs:.4f}% FS")
     return _save(fig, output_dir / f"normalized_linear.{config.image_format}", config)
@@ -249,7 +258,7 @@ def plot_normalized_surface(result: FittingResult, output_dir: Path, config: Fit
                edgecolors="none", rasterized=True, label="Normalized measured output")
     ax.scatter(normalized_product, predicted, s=2.5, alpha=0.10, color=PAPER_COLORS["red"],
                edgecolors="none", rasterized=True, label="Surface prediction")
-    ax.plot([0, 1], [0, 1], "--", color="#202124", lw=1, label="Ideal y=x")
+    ax.plot([0, 1], [0, 1], "--", color="#202124", lw=1.6, label="Ideal y=x")
     ax.legend(loc="upper left", frameon=False)
     c = fit.coefficients
     _metric_box(ax, f"Surface $R^2$ = {fit.metrics.r2:.6f}\nα = {c['alpha']:.5g}\nβ = {c['beta']:.5g}\nγ = {c['gamma']:.5g}\nρ = {c['rho']:.5g}")
@@ -271,7 +280,7 @@ def plot_normalized_lut(result: FittingResult, output_dir: Path, config: Fitting
     fig, ax = _normalized_axis(result, "four-term differential multiplication LUT")
     ax.scatter(p, lut.ravel() / 65025.0, s=2.5, alpha=0.10, color=PAPER_COLORS["red"],
                edgecolors="none", rasterized=True, label="Normalized LUT output")
-    ax.plot([0, 1], [0, 1], "--", color="#202124", lw=1.2, label="Ideal y=x")
+    ax.plot([0, 1], [0, 1], "--", color="#202124", lw=1.8, label="Ideal y=x")
     ax.legend(loc="upper left", frameon=False)
     _metric_box(ax, f"LUT $R^2$ = {lut_r2:.6f}\nRMSE = {np.sqrt(np.mean(residual**2)):.2f} code\nMAE = {np.mean(np.abs(residual)):.2f} code\ngain = {result.lut_gain:.7g}")
     return _save(fig, output_dir / f"normalized_lut.{config.image_format}", config)

@@ -29,6 +29,10 @@ class BatchInferenceRequest:
     group_size: int = 100
     inference_batch_size: int = 128
     output_path: Path | None = None
+    adc_bits: int | None = None
+    noise_sigma: float = 0.0
+    noise_rho: float = 0.0
+    noise_seed: int = 0
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,10 @@ def _validate(
         raise ValueError("group_size must be positive")
     if request.inference_batch_size <= 0:
         raise ValueError("inference_batch_size must be positive")
+    if request.adc_bits is not None and not 2 <= int(request.adc_bits) <= 16:
+        raise ValueError("adc_bits must be None or in [2, 16]")
+    if request.noise_sigma < 0 or not 0 <= request.noise_rho <= 1:
+        raise ValueError("noise_sigma must be non-negative and noise_rho must be in [0, 1]")
     project = _resolved(request.project_root)
     dataset = _resolved(request.dataset_root)
     checkpoint = _resolved(request.checkpoint_path)
@@ -183,6 +191,9 @@ def run_grouped_batch_inference(
     import torch
 
     from .inference_runtime import get_registered_inference_resources
+    from .runtime_memory import (
+        is_cuda_oom, memory_aware_batch_size, release_cuda_memory,
+    )
 
     requested_device = request.device.strip().lower()
     if requested_device == "auto":
@@ -220,34 +231,76 @@ def run_grouped_batch_inference(
         ("ideal_differential", resources.ideal_model),
         ("device_differential", resources.device_model),
     )
+    from .layers import configure_model_nonidealities
+    configure_model_nonidealities(
+        resources.ideal_model, adc_bits=request.adc_bits, noise_seed=request.noise_seed
+    )
+    configure_model_nonidealities(
+        resources.device_model, adc_bits=request.adc_bits,
+        noise_sigma=request.noise_sigma, noise_rho=request.noise_rho,
+        noise_seed=request.noise_seed,
+    )
     correct_by_mode: dict[str, list[bool]] = {name: [] for name, _ in mode_models}
     elapsed_by_mode = {name: 0.0 for name, _ in mode_models}
 
+    adaptive_batch_size, memory_snapshot = memory_aware_batch_size(
+        request.inference_batch_size, resources.device
+    )
+    minimum_batch_size = adaptive_batch_size
+    runtime_device = resources.device
+    cpu_fallback = False
     if progress:
         progress(0, request.sample_count)
-    for start in range(0, request.sample_count, request.inference_batch_size):
+    start = 0
+    while start < request.sample_count:
         if cancelled and cancelled():
             raise BatchInferenceCancelled(
                 f"Batch inference cancelled after {start} of {request.sample_count} samples"
             )
-        end = min(start + request.inference_batch_size, request.sample_count)
+        end = min(start + adaptive_batch_size, request.sample_count)
         samples = [resources.dataset[index] for index in range(start, end)]
-        inputs = torch.stack([sample[0] for sample in samples]).to(resources.device)
+        inputs = torch.stack([sample[0] for sample in samples]).to(runtime_device)
         labels = torch.tensor(
-            [int(sample[1]) for sample in samples], device=resources.device, dtype=torch.long
+            [int(sample[1]) for sample in samples], device=runtime_device, dtype=torch.long
         )
-        for mode, model in mode_models:
-            if resources.device.type == "cuda":
-                torch.cuda.synchronize()
-            started = perf_counter()
-            with torch.inference_mode():
-                predicted = model(inputs).argmax(dim=1)
-            if resources.device.type == "cuda":
-                torch.cuda.synchronize()
-            elapsed_by_mode[mode] += (perf_counter() - started) * 1_000.0
-            correct_by_mode[mode].extend(
-                bool(value) for value in predicted.eq(labels).detach().cpu().tolist()
-            )
+        batch_correct: dict[str, list[bool]] = {}
+        batch_elapsed: dict[str, float] = {}
+        try:
+            for mode, model in mode_models:
+                if runtime_device.type == "cuda":
+                    torch.cuda.synchronize()
+                started_mode = perf_counter()
+                with torch.inference_mode():
+                    predicted = model(inputs).argmax(dim=1)
+                if runtime_device.type == "cuda":
+                    torch.cuda.synchronize()
+                batch_elapsed[mode] = (perf_counter() - started_mode) * 1_000.0
+                batch_correct[mode] = [
+                    bool(value) for value in predicted.eq(labels).detach().cpu().tolist()
+                ]
+        except BaseException as exc:
+            if runtime_device.type != "cuda" or not is_cuda_oom(exc):
+                raise
+            del inputs, labels
+            release_cuda_memory()
+            if adaptive_batch_size > 1:
+                adaptive_batch_size = max(1, adaptive_batch_size // 2)
+                minimum_batch_size = min(minimum_batch_size, adaptive_batch_size)
+                continue
+            # Batch size one is already the smallest possible.  Preserve a
+            # successful result by falling back to CPU instead of aborting.
+            runtime_device = torch.device("cpu")
+            for _mode, model in mode_models:
+                model.to(runtime_device)
+            from .inference_runtime import clear_lenet_inference_cache
+            clear_lenet_inference_cache()
+            release_cuda_memory()
+            cpu_fallback = True
+            continue
+        for mode in batch_correct:
+            elapsed_by_mode[mode] += batch_elapsed[mode]
+            correct_by_mode[mode].extend(batch_correct[mode])
+        start = end
         if progress:
             progress(end, request.sample_count)
 
@@ -279,6 +332,14 @@ def run_grouped_batch_inference(
         "dataset_root": str(dataset),
         "checkpoint": str(checkpoint),
         "error_model": str(error_model),
+        "adc_bits": "ideal" if request.adc_bits is None else str(request.adc_bits),
+        "noise_sigma": str(request.noise_sigma),
+        "noise_rho": str(request.noise_rho),
+        "requested_batch_size": str(request.inference_batch_size),
+        "effective_min_batch_size": str(minimum_batch_size),
+        "cuda_free_bytes_at_start": str(memory_snapshot["free_bytes"]),
+        "cuda_total_bytes": str(memory_snapshot["total_bytes"]),
+        "cpu_fallback_after_cuda_oom": str(cpu_fallback),
     }
     if model_id == "bnn-mnist":
         resource_paths["input_scales"] = "runtime calibration from MNIST training samples"
@@ -287,10 +348,10 @@ def run_grouped_batch_inference(
     outcome = GroupedBatchInferenceOutcome(
         model_id=model_id,
         dataset="CIFAR-10/test" if model_id.endswith("cifar10") else "MNIST/test",
-        device=str(resources.device),
+        device=("cpu（CUDA 显存不足后自动回退）" if cpu_fallback else str(runtime_device)),
         sample_count=request.sample_count,
         group_size=request.group_size,
-        inference_batch_size=request.inference_batch_size,
+        inference_batch_size=minimum_batch_size,
         cache_hit=cache_hit,
         preparation_ms=preparation_ms,
         total_elapsed_ms=(perf_counter() - total_started) * 1_000.0,

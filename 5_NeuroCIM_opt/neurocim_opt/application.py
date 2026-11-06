@@ -298,6 +298,10 @@ class PlatformService:
         checkpoint_path: str | Path | None = None,
         quantization_path: str | Path | None = None,
         error_model_path: str | Path | None = None,
+        adc_bits: int | None = None,
+        noise_sigma: float = 0.0,
+        noise_rho: float = 0.0,
+        noise_seed: int = 0,
     ) -> BatchInferenceOutcome:
         """Run a real MNIST batch through float, ideal and device-LUT paths."""
 
@@ -356,6 +360,12 @@ class PlatformService:
             torch.cuda.synchronize()
         preparation_ms = (perf_counter() - total_started) * 1_000.0
 
+        from .layers import configure_model_nonidealities
+        configure_model_nonidealities(resources.ideal_model, adc_bits=adc_bits, noise_seed=noise_seed)
+        configure_model_nonidealities(
+            resources.device_model, adc_bits=adc_bits, noise_sigma=noise_sigma,
+            noise_rho=noise_rho, noise_seed=noise_seed,
+        )
         predictions: list[BatchInferencePrediction] = []
         for mode, model in (
             ("float", resources.float_model),
@@ -406,12 +416,18 @@ class PlatformService:
         checkpoint_path: str | Path | None = None,
         quantization_path: str | Path | None = None,
         error_model_path: str | Path | None = None,
+        adc_bits: int | None = None,
+        noise_sigma: float = 0.0,
+        noise_rho: float = 0.0,
+        noise_seed: int = 0,
     ) -> SingleInferenceOutcome:
         """Run one real sample; cached calls avoid rebuilding inference resources."""
         batch = PlatformService.infer_lenet5_mnist_batch(
             project_root, (sample_index,), dataset_root=dataset_root, device=device,
             checkpoint_path=checkpoint_path, quantization_path=quantization_path,
             error_model_path=error_model_path,
+            adc_bits=adc_bits, noise_sigma=noise_sigma, noise_rho=noise_rho,
+            noise_seed=noise_seed,
         )
         return SingleInferenceOutcome(
             sample_index=sample_index,
@@ -444,6 +460,10 @@ class PlatformService:
         error_model_path: str | Path,
         auxiliary_path: str | Path | None = None,
         device: str | None = None,
+        adc_bits: int | None = None,
+        noise_sigma: float = 0.0,
+        noise_rho: float = 0.0,
+        noise_seed: int = 0,
     ) -> SingleInferenceOutcome:
         """Run native, ideal-differential, and device-differential inference."""
 
@@ -466,6 +486,8 @@ class PlatformService:
                 root, sample_index, dataset_root=dataset, device=execution_device,
                 checkpoint_path=checkpoint, quantization_path=auxiliary_path,
                 error_model_path=error_model,
+                adc_bits=adc_bits, noise_sigma=noise_sigma, noise_rho=noise_rho,
+                noise_seed=noise_seed,
             )
 
         for path, purpose in ((checkpoint, "checkpoint"), (error_model, "device error model")):
@@ -478,6 +500,14 @@ class PlatformService:
             inputs = sample.unsqueeze(0).to(execution_device)
             predictions: list[InferencePrediction] = []
             for name, model in modes:
+                from .layers import configure_model_nonidealities
+                if name == "ideal_differential":
+                    configure_model_nonidealities(model, adc_bits=adc_bits, noise_seed=noise_seed)
+                elif name not in {"float", "native_bnn"}:
+                    configure_model_nonidealities(
+                        model, adc_bits=adc_bits, noise_sigma=noise_sigma,
+                        noise_rho=noise_rho, noise_seed=noise_seed,
+                    )
                 model.eval().to(execution_device)
                 if execution_device == "cuda":
                     torch.cuda.synchronize()
