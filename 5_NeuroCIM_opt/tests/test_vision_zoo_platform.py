@@ -19,7 +19,7 @@ from neurocim_opt.training_service import (
 def _resources() -> tuple[Path, Path, Path]:
     checkpoint = PROJECT / "3_models/VisionZoo/checkpoint/resnet8_mnist.pt"
     auxiliary = PROJECT / "3_models/VisionZoo/checkpoint/resnet8-mnist_input_scales.json"
-    error_model = ROOT / "outputs/error_models/03_AOS_1/error_model.json"
+    error_model = ROOT / "outputs/error_models/03_UOS_1/error_model.json"
     required = (
         checkpoint, auxiliary, error_model,
         PROJECT / "data/mnist/MNIST/raw/train-images-idx3-ubyte",
@@ -62,7 +62,7 @@ def test_resnet8_single_inference_runs_all_three_modes() -> None:
     assert all(len(item.top5) == 5 for item in outcome.predictions)
 
 
-def test_resnet8_training_prepare_uses_shared_factory_and_bounded_batches(tmp_path: Path) -> None:
+def test_resnet8_training_prepare_uses_shared_factory_and_adaptive_batches(tmp_path: Path) -> None:
     checkpoint, auxiliary, error_model = _resources()
     request = TrainingRequest(
         PROJECT, error_model, tmp_path / "training", model_id="resnet8-mnist",
@@ -75,8 +75,8 @@ def test_resnet8_training_prepare_uses_shared_factory_and_bounded_batches(tmp_pa
     loaders, base, training_converter, evaluation_converter, state = service._prepare(
         resources, request,
     )
-    assert loaders[0].batch_size == VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT
-    assert loaders[2].batch_size == VISION_ZOO_DIFFERENTIAL_BATCH_LIMIT
+    assert loaders[0].batch_size == request.batch_size
+    assert loaders[2].batch_size == request.batch_size
     assert base().__class__.__name__ == "ResNet8MNIST"
     assert training_converter is evaluation_converter
     assert state

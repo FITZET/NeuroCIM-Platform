@@ -21,7 +21,7 @@ def _fitting_files(tmp_path: Path) -> tuple[Path, Path]:
     summary.write_text(
         json.dumps(
             {
-                "dataset": "AOS1",
+                "dataset": "UOS1",
                 "source": str(source),
                 "sha256": "a" * 64,
                 "acquisition": {"code_bits": 8},
@@ -80,7 +80,7 @@ def test_registry_records_all_fits_and_only_lut_is_selectable(tmp_path: Path) ->
     empirical = next(item for item in selectable if item["method"] == "empirical_interaction")
     assert empirical["metrics"]["r2_to_ideal_lut"] < 1.0
     assert "r2_to_empirical_lut" not in empirical["metrics"]
-    assert empirical["name"] == "AOS1 原始实测误差表"
+    assert empirical["name"] == "UOS1 原始实测误差表"
     with pytest.raises(ValueError, match="analytical only"):
         registry.resolve(next(item["id"] for item in registry.models() if not item["selectable"]))
 
@@ -99,7 +99,7 @@ def test_different_fitting_runs_keep_independent_model_directories(tmp_path: Pat
     registry = ErrorModelRegistry(tmp_path / "registry.json")
     registry.register_fitting_run(error_model_path=error, fitting_summary_path=summary)
     payload = json.loads(summary.read_text(encoding="utf-8"))
-    payload["dataset"] = "AOS2"
+    payload["dataset"] = "UOS2"
     payload["sha256"] = "b" * 64
     summary.write_text(json.dumps(payload), encoding="utf-8")
     registry.register_fitting_run(error_model_path=error, fitting_summary_path=summary)

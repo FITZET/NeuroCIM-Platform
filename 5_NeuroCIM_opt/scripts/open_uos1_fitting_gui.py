@@ -1,4 +1,4 @@
-"""Open the fitting page, run AOS1, and keep all generated plot tabs visible."""
+"""Open the fitting page, run UOS1, and keep all generated plot tabs visible."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -35,8 +35,8 @@ def main() -> int:
                     analysis_tabs.setCurrentIndex(index)
                     break
 
-    cell.path_edit.setText(str((PROJECT_ROOT / "0_data" / "03_AOS_1.csv").resolve()))
-    cell.output_edit.setText(str((PLATFORM_ROOT / "outputs" / "demo" / "aos1_gui" / "fit_result").resolve()))
+    cell.path_edit.setText(str((PROJECT_ROOT / "0_data" / "03_UOS_1.csv").resolve()))
+    cell.output_edit.setText(str((PLATFORM_ROOT / "outputs" / "demo" / "uos1_gui" / "fit_result").resolve()))
     cell._refresh_mapping_columns()
     for combo in cell.mapping_edits.values():
         combo.setCurrentIndex(0)

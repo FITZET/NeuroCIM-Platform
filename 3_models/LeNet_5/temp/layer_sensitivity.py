@@ -34,8 +34,8 @@ FIGURE_PATH = SCRIPT_DIR / "layer_sensitivity.png"
 DEVICE_LUTS = {
     "NMOS": PROJECT_ROOT / "1_data_fitting" / "output" / "01_NMOS" / "hardware_multiplication_lut.csv",
     "CFET": PROJECT_ROOT / "1_data_fitting" / "output" / "02_CFET" / "hardware_multiplication_lut.csv",
-    "AOS_1": PROJECT_ROOT / "1_data_fitting" / "output" / "03_AOS_1" / "hardware_multiplication_lut.csv",
-    "AOS_2": PROJECT_ROOT / "1_data_fitting" / "output" / "04_AOS_2" / "hardware_multiplication_lut.csv",
+    "UOS_1": PROJECT_ROOT / "1_data_fitting" / "output" / "03_UOS_1" / "hardware_multiplication_lut.csv",
+    "UOS_2": PROJECT_ROOT / "1_data_fitting" / "output" / "04_UOS_2" / "hardware_multiplication_lut.csv",
 }
 
 

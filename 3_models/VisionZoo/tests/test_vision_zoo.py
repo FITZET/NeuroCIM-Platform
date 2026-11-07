@@ -26,7 +26,7 @@ EXPECTED_PARAMETERS = {
     "resnet8-mnist": 75_002,
     "mobilenetv2-cifar10": 2_236_682,
     "vgg11-bn-cifar10": 9_756_426,
-    "squeezenet1_1-cifar10": 727_626,
+    "squeezenet1_1-cifar10": 732_010,
 }
 
 
@@ -67,7 +67,8 @@ def test_official_weights_have_expected_hash_and_load_strictly() -> None:
         assert isinstance(model, nn.Module)
     assert metadata["weights"]["resnet8-mnist"]["test_accuracy"] == pytest.approx(0.9936)
     squeeze = metadata["weights"]["squeezenet1_1-cifar10"]
-    assert squeeze["test_accuracy"] == pytest.approx(0.7654)
+    assert squeeze["test_accuracy"] == pytest.approx(0.9168)
+    assert squeeze["test_samples"] == 10_000
     assert sha256_file(ROOT / "checkpoint" / squeeze["filename"]) == squeeze["sha256"]
 
 

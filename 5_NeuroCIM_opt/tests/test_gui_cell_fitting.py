@@ -142,10 +142,10 @@ def test_csv_headers_populate_mapping_dropdowns(tmp_path: Path) -> None:
     widget.close()
 
 
-def test_aos2_standard_mapping_and_bit_width_are_detected() -> None:
+def test_uos2_standard_mapping_and_bit_width_are_detected() -> None:
     app = QApplication.instance() or QApplication([])
     widget = CellFittingWidget(ROOT)
-    widget.path_edit.setText(str(PROJECT_ROOT / "0_data" / "04_AOS_2.csv"))
+    widget.path_edit.setText(str(PROJECT_ROOT / "0_data" / "04_UOS_2.csv"))
     widget._refresh_mapping_columns()
     app.processEvents()
 

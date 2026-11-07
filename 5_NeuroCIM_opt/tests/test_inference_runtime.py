@@ -19,6 +19,20 @@ from neurocim_opt.inference_runtime import (
 )
 
 
+def test_model_resource_cache_is_globally_bounded_to_one(monkeypatch) -> None:
+    import neurocim_opt.inference_runtime as runtime
+
+    monkeypatch.setattr(runtime.gc, "collect", lambda: 0)
+    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+    clear_lenet_inference_cache()
+    runtime._remember_single_resource(runtime._CACHE, ("lenet",), object())
+    assert lenet_inference_cache_info().entries == 1
+    runtime._remember_single_resource(runtime._REGISTERED_CACHE, ("resnet",), object())
+    assert lenet_inference_cache_info().entries == 1
+    assert not runtime._CACHE and len(runtime._REGISTERED_CACHE) == 1
+    clear_lenet_inference_cache()
+
+
 def test_lenet_loader_prefers_best_error_aware_state(tmp_path: Path) -> None:
     import torch
 

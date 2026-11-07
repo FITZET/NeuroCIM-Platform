@@ -15,15 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QPainter, QPen, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QPlainTextEdit, QScrollArea, QSizePolicy
 from neurocim_opt.gui import (
     BatchInferenceWidget, CellFittingWidget, MacAnalysisWidget, MainWindow, ModelCatalogWidget,
     PpaEvaluationWidget, SingleInferenceWidget, ErrorAwareTrainingWidget, GPT2GenerationWidget,
     GPT2BatchInferenceWidget, WikiText2EvaluationWidget,
     UnifiedBatchInferenceWidget, UnifiedSingleInferenceWidget,
-    WorkflowCoordinator, QComboBox,
+    WorkflowCoordinator, QComboBox, FRONTEND_MODEL_IDS,
 )
 from neurocim_opt.application import CellFitOutcome
 from neurocim_opt.error_model import HardwareErrorModel
@@ -67,13 +67,25 @@ def test_main_window_shows_live_model_catalog() -> None:
     assert all(tabs.tabText(index) != "NeuroSim PPA" for index in range(tabs.count()))
     catalog = tabs.widget(1).findChild(ModelCatalogWidget)
     assert catalog is not None
-    assert catalog.table.rowCount() == len(builtin_registry(ROOT).list())
+    assert catalog.table.rowCount() == len(FRONTEND_MODEL_IDS)
     rows = {
         catalog.table.item(row, 1).text(): catalog.table.item(row, 7).text()
         for row in range(catalog.table.rowCount())
     }
-    assert set(rows) == {item.model_id for item in builtin_registry(ROOT).list()}
-    assert rows["squeezenet1_1-cifar10"] == rows["mobilenetv2-cifar10"]
+    assert tuple(spec.model_id for spec in catalog.specs) == FRONTEND_MODEL_IDS
+    assert set(rows) == {
+        "LeNet-5", "ResNet-8", "MobileNetV2", "VGG11", "SqueezeNet",
+        "BNN (BinaryNet)", "TinyTransformer", "GPT-2-large",
+    }
+    assert rows["SqueezeNet"] == rows["MobileNetV2"]
+    report_baselines = {
+        catalog.table.item(row, 1).text(): catalog.table.item(row, 4).text()
+        for row in range(catalog.table.rowCount())
+    }
+    assert report_baselines["ResNet-8"] == "95.00%"
+    assert report_baselines["LeNet-5"] == "98.69%"
+    assert report_baselines["BNN (BinaryNet)"] == "99.00%"
+    assert report_baselines["GPT-2-large"] == "PPL=30.69"
     single = tabs.widget(2).findChild(UnifiedSingleInferenceWidget)
     batch = tabs.widget(3).findChild(UnifiedBatchInferenceWidget)
     assert single is not None and batch is not None
@@ -154,6 +166,67 @@ def test_single_inference_progress_is_directly_below_run_controls() -> None:
     widget.close()
 
 
+def test_single_inference_exposes_three_input_modes() -> None:
+    application = QApplication.instance() or QApplication([])
+    widget = SingleInferenceWidget(ROOT.parent)
+    assert widget.dataset_mode_button.isChecked()
+    assert widget.input_stack.currentIndex() == 0
+    assert widget.input_stack.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+    dataset_height = widget.input_stack.sizeHint().height()
+    assert widget.input_stack.minimumHeight() == dataset_height
+    assert widget.input_stack.maximumHeight() == dataset_height
+
+    widget.upload_mode_button.click(); application.processEvents()
+    assert widget.upload_mode_button.isChecked()
+    assert widget.input_stack.currentIndex() == 1
+
+    widget.model_combo.setCurrentIndex(widget.model_combo.findData("resnet8-mnist"))
+    application.processEvents()
+    assert widget.handwriting_mode_button.isEnabled()
+    widget.handwriting_mode_button.click(); application.processEvents()
+    assert widget.handwriting_mode_button.isChecked()
+    assert widget.input_stack.currentIndex() == 2
+    assert widget.input_stack.sizeHint().height() > dataset_height + 150
+    assert widget.input_stack.height() == widget.input_stack.sizeHint().height()
+
+    widget.model_combo.setCurrentIndex(widget.model_combo.findData("mobilenetv2-cifar10"))
+    application.processEvents()
+    assert not widget.handwriting_mode_button.isEnabled()
+    assert widget.dataset_mode_button.isChecked()
+    assert widget.input_stack.currentIndex() == 0
+    assert widget.input_stack.sizeHint().height() == dataset_height
+    assert widget.input_stack.height() == dataset_height
+    widget.close()
+
+
+def test_mnist_handwriting_uses_real_three_mode_inference() -> None:
+    application = QApplication.instance() or QApplication([])
+    widget = SingleInferenceWidget(ROOT.parent)
+    widget.model_combo.setCurrentIndex(widget.model_combo.findData("resnet8-mnist"))
+    dataset_root = Path(widget.dataset_edit.text())
+    if not (dataset_root / "MNIST").is_dir() or not widget.run_button.isEnabled():
+        pytest.skip("LeNet/MNIST inference resources are unavailable")
+
+    canvas = widget.handwriting_canvas._image
+    painter = QPainter(canvas)
+    painter.setPen(QPen(Qt.GlobalColor.white, 18, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.drawLine(126, 35, 126, 215); painter.end()
+    widget.handwriting_mode_button.click(); application.processEvents()
+    assert widget.handwriting_canvas.has_ink()
+    widget.start_inference()
+    assert widget.worker is not None and widget.worker.wait(30_000)
+    application.processEvents()
+    outcome = widget.last_outcome
+    assert outcome is not None, widget.log.toPlainText()
+    assert outcome.true_label == -1
+    assert outcome.input_shape == (1, 28, 28)
+    assert len(outcome.predictions) == 3
+    assert all(len(item.top5) == 5 for item in outcome.predictions)
+    assert "未知（自定义输入）" in widget.final_prediction.text()
+    widget.close()
+
+
 def test_requested_progress_and_result_panel_layouts() -> None:
     application = QApplication.instance() or QApplication([])
     cell = CellFittingWidget(ROOT)
@@ -175,6 +248,18 @@ def test_requested_progress_and_result_panel_layouts() -> None:
     assert batch.chart_scroll.maximumHeight() == 365
     assert batch.chart_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     cell.close(); training.close(); single.close(); batch.close()
+
+
+def test_main_window_bounds_long_running_gui_memory() -> None:
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(ROOT)
+    assert window._memory_watchdog.isActive()
+    readonly_editors = [
+        editor for editor in window.findChildren(QPlainTextEdit) if editor.isReadOnly()
+    ]
+    assert readonly_editors
+    assert all(editor.document().maximumBlockCount() == 1500 for editor in readonly_editors)
+    window.close()
 
 
 def test_fit_mode_highlight_tracks_the_visible_page() -> None:
@@ -199,16 +284,16 @@ def test_catalog_selection_drives_single_and_batch_task_views(tmp_path: Path) ->
     coordinator.context = WorkflowContext(tmp_path / "workflow_context.json")
     single = UnifiedSingleInferenceWidget(ROOT.parent, coordinator=coordinator)
     batch = UnifiedBatchInferenceWidget(ROOT.parent, coordinator=coordinator)
-    coordinator.select_network_model("gpt2-small")
+    coordinator.select_network_model("gpt2-large")
     application.processEvents()
     assert single.stack.currentWidget() is single.gpt_widget
     assert batch.stack.currentWidget() is batch.gpt_widget
-    coordinator.select_network_model("resnet20-cifar10")
+    coordinator.select_network_model("resnet8-mnist")
     application.processEvents()
     assert single.stack.currentWidget() is single.image_widget
     assert batch.stack.currentWidget() is batch.image_widget
-    assert single.image_widget.model_combo.currentData() == "resnet20-cifar10"
-    assert batch.image_widget.model_combo.currentData() == "resnet20-cifar10"
+    assert single.image_widget.model_combo.currentData() == "resnet8-mnist"
+    assert batch.image_widget.model_combo.currentData() == "resnet8-mnist"
     assert not single.image_widget.model_combo.isEnabled()
     assert not batch.image_widget.model_combo.isEnabled()
     single.close(); batch.close()
@@ -256,7 +341,7 @@ def test_catalog_never_enables_partial_gpt2_large_download() -> None:
 def test_real_single_sample_inference_offscreen() -> None:
     application = QApplication.instance() or QApplication([])
     widget = SingleInferenceWidget(ROOT.parent)
-    widget.model_combo.setCurrentIndex(widget.model_combo.findData("lenet5-mnist"))
+    widget.model_combo.setCurrentIndex(widget.model_combo.findData("resnet8-mnist"))
     dataset_root = Path(widget.dataset_edit.text())
     if not (dataset_root / "MNIST").is_dir():
         pytest.skip("select or install an MNIST dataset root")
@@ -303,11 +388,18 @@ def test_single_inference_model_selection_updates_resources() -> None:
     application = QApplication.instance() or QApplication([])
     widget = SingleInferenceWidget(ROOT.parent)
     assert widget.model_combo.findData("gpt2-small") == -1
+    assert widget.model_combo.findData("resnet20-cifar10") == -1
+    lenet_index = widget.model_combo.findData("lenet5-mnist")
+    assert lenet_index >= 0 and widget.model_combo.model().item(lenet_index).isEnabled()
+    widget.model_combo.setCurrentIndex(lenet_index)
+    assert widget.dataset_name.text() == "MNIST"
+    assert widget.checkpoint_edit.text().endswith("lenet5_float.pt")
+    assert widget.auxiliary_edit.text().endswith("quantization.json")
     widget.model_combo.setCurrentIndex(widget.model_combo.findData("bnn-mnist"))
     assert widget.dataset_name.text() == "MNIST"
     assert widget.auxiliary_edit.isEnabled() is False
     assert widget.checkpoint_edit.text().endswith("bnn_mnist.pt")
-    widget.model_combo.setCurrentIndex(widget.model_combo.findData("resnet20-cifar10"))
+    widget.model_combo.setCurrentIndex(widget.model_combo.findData("mobilenetv2-cifar10"))
     assert widget.dataset_name.text() == "CIFAR-10"
     assert widget.auxiliary_edit.isEnabled() is True
     assert widget.auxiliary_edit.text().endswith("input_scales.json")
@@ -350,13 +442,13 @@ def test_single_inference_model_selection_updates_resources() -> None:
 def test_single_inference_discards_stale_portable_resource_paths(tmp_path: Path) -> None:
     application = QApplication.instance() or QApplication([])
     widget = SingleInferenceWidget(ROOT.parent)
-    model_id = "lenet5-mnist"
+    model_id = "resnet8-mnist"
     defaults = widget._model_defaults(model_id)
     stale = tmp_path / "old-portable-location"
     settings = {
         "dataset_root": stale / "data" / "mnist",
-        "checkpoint": stale / "3_models" / "LeNet_5" / "chekpoint" / "lenet5_float.pt",
-        "auxiliary": stale / "3_models" / "LeNet_5" / "chekpoint" / "quantization.json",
+        "checkpoint": stale / "3_models" / "VisionZoo" / "checkpoint" / "resnet8_mnist.pt",
+        "auxiliary": stale / "3_models" / "VisionZoo" / "checkpoint" / "resnet8-mnist_input_scales.json",
     }
     try:
         for name, path in settings.items():
@@ -431,13 +523,13 @@ def test_error_selection_syncs_inference_pages_and_training_inherits_step_two(tm
     checkpoint = tmp_path / "model.pt"; checkpoint.write_bytes(b"weights")
     auxiliary = tmp_path / "scales.json"; auxiliary.write_text("{}", encoding="utf-8")
     coordinator.record_inference(
-        model_id=order1["id"], dataset_name="CIFAR-10", dataset_root=dataset,
-        network_model="resnet20-cifar10", checkpoint_path=checkpoint,
+        model_id=order1["id"], dataset_name="MNIST", dataset_root=dataset,
+        network_model="resnet8-mnist", checkpoint_path=checkpoint,
         auxiliary_path=auxiliary, device="cpu", result={"accuracy": 0.5},
     )
     application.processEvents()
-    assert training.model_edit.text() == "resnet20-cifar10"
-    assert training.dataset_name.text() == "CIFAR-10"
+    assert training.model_edit.text() == "resnet8-mnist"
+    assert training.dataset_name.text() == "MNIST"
     assert training.error_model_combo.currentData() == order1["id"]
     order2 = next(item for item in coordinator.models() if item["method"] == "smooth_interaction_order2")
     training.error_model_combo.setCurrentIndex(training.error_model_combo.findData(order2["id"]))

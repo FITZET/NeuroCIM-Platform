@@ -54,7 +54,7 @@ def test_builtin_specs_expose_resources_capabilities_and_provenance() -> None:
         if spec.model_id == "gpt2-large":
             assert spec.datasets == ("wikitext2",)
             assert spec.supports("language_model_evaluation")
-            assert spec.weight_sha256 == "5f47f3e12f91cd33b662ce7e433b6150ad5512b5884a2cee961b50e9c3bbebce"
+            assert spec.weight_sha256 == "9008e91f3c248005e27aa0a258f334029cccdd32f700a9c459b143b3eb1eccc3"
             # A .partial download must never make the registry claim readiness.
             if not spec.checkpoint_available:
                 assert not spec.resources_available
@@ -84,7 +84,7 @@ def test_builtin_specs_expose_resources_capabilities_and_provenance() -> None:
     assert mobile.checkpoint_available
     squeeze = registry.get("squeezenet1_1-cifar10")
     assert squeeze.checkpoint_available
-    assert squeeze.weight_sha256 == "df967fd502b9d8fe2e7dea77d8363ad7fe14df04efcc173df1f94fc05f7cfe4c"
+    assert squeeze.weight_sha256 == "5fe061ba144cc2b9890b47b3a395d36c7195051aea894bbaed3a245694fde196"
 
     gpt2 = registry.get("gpt2-small")
     assert gpt2.dataset_root is None
@@ -93,7 +93,7 @@ def test_builtin_specs_expose_resources_capabilities_and_provenance() -> None:
     assert gpt2.supports("error_aware_training")
     large = registry.get("gpt2-large")
     assert large.dataset_root == PROJECT / "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1"
-    assert large.checkpoint.name == "model.safetensors"
+    assert large.checkpoint.name == "model.fp16.safetensors"
 
 
 def test_original_model_spec_positional_constructor_remains_compatible() -> None:
@@ -104,6 +104,22 @@ def test_original_model_spec_positional_constructor_remains_compatible() -> None
     assert spec.model_root is None
     assert spec.auxiliary_resources == ()
     assert spec.capabilities == ()
+
+
+def test_frontend_report_metadata_matches_delivery_table() -> None:
+    registry = builtin_registry(PROJECT)
+    expected = {
+        "resnet8-mnist": ("手写数字识别", "MNIST", "95.00%", "残差 CNN"),
+        "mobilenetv2-cifar10": ("图像分类", "CIFAR-10", "84.00%", "轻量 CNN"),
+        "vgg11-bn-cifar10": ("图像分类", "CIFAR-10", "85.00%", "高算力 CNN"),
+        "squeezenet1_1-cifar10": ("图像分类", "CIFAR-10", "81.00%", "超轻量 CNN"),
+        "bnn-mnist": ("手写数字识别", "MNIST", "99.00%", "二值网络"),
+        "tinytransformer-cifar10": ("情感分类", "合成数据", "99.60%", "轻量语言模型"),
+        "gpt2-large": ("语言建模", "WikiText-2", "PPL=30.69", "大语言模型"),
+    }
+    for model_id, row in expected.items():
+        spec = registry.get(model_id)
+        assert (spec.report_task, spec.report_dataset, spec.report_baseline, spec.model_family) == row
 
 
 def test_resource_manifest_matches_registry() -> None:

@@ -17,7 +17,7 @@ def _resources() -> tuple[Path, Path, Path, Path]:
     checkpoint = PROJECT / "3_models/GPT2/checkpoint/gpt2_nanogpt.pt"
     tokenizer = PROJECT / "3_models/GPT2/checkpoint/tokenizer"
     scales = PROJECT / "3_models/GPT2/checkpoint/input_scales.json"
-    error = ROOT / "outputs/error_models/03_AOS_1/error_model.json"
+    error = ROOT / "outputs/error_models/03_UOS_1/error_model.json"
     if not checkpoint.is_file() or not tokenizer.is_dir() or not scales.is_file() or not error.is_file():
         pytest.skip("GPT-2 integration resources are not installed")
     return checkpoint, tokenizer, scales, error

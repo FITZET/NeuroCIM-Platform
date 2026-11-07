@@ -207,4 +207,6 @@ def test_tinytransformer_training_uses_two_heads_but_evaluation_uses_full_graph(
     assert training_names == {"classifier.attention_pool", "classifier.fc"}
     assert evaluation_names == all_mac_names
     assert len(evaluation_names) == 31
-    assert loaders[2].batch_size == TINYTRANSFORMER_EVAL_BATCH_LIMIT
+    # Keep a large host loader batch; CUDA execution is independently split
+    # and adapted from measured peaks inside the training service.
+    assert loaders[2].batch_size == request.batch_size

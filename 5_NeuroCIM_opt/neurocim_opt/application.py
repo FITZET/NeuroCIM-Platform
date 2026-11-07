@@ -464,8 +464,15 @@ class PlatformService:
         noise_sigma: float = 0.0,
         noise_rho: float = 0.0,
         noise_seed: int = 0,
+        input_image: str | Path | np.ndarray | None = None,
     ) -> SingleInferenceOutcome:
-        """Run native, ideal-differential, and device-differential inference."""
+        """Run native, ideal-differential, and device-differential inference.
+
+        ``input_image`` may be a user-selected image path or an HxW/HxWxC
+        array in the 0..1/0..255 range.  Dataset-backed inference remains the
+        default; custom inputs deliberately use ``true_label=-1`` because no
+        ground-truth label is available.
+        """
 
         import torch
 
@@ -479,7 +486,7 @@ class PlatformService:
         if execution_device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA was selected but is unavailable")
 
-        if model_id == "lenet5-mnist":
+        if model_id == "lenet5-mnist" and input_image is None:
             if auxiliary_path is None:
                 raise FileNotFoundError("LeNet-5 quantization parameters were not selected")
             return PlatformService.infer_lenet5_mnist(
@@ -494,6 +501,91 @@ class PlatformService:
             if not path.is_file():
                 raise FileNotFoundError(f"Required {purpose} is missing: {path}")
         started = perf_counter()
+
+        def prepare_custom_image(
+            *, size: int, mean_values: tuple[float, ...],
+            std_values: tuple[float, ...],
+            center_mnist: bool = False, padding: int = 0,
+        ):
+            """Convert a file/canvas image to the selected model's input space."""
+
+            from PIL import Image
+            import torch.nn.functional as functional
+
+            if isinstance(input_image, (str, Path)):
+                with Image.open(input_image) as loaded:
+                    array = np.asarray(loaded.convert("RGB"), dtype=np.float32)
+            else:
+                array = np.asarray(input_image, dtype=np.float32)
+            if array.size == 0:
+                raise ValueError("The custom input image is empty")
+            if array.ndim == 2:
+                array = array[:, :, None]
+            elif array.ndim == 3 and array.shape[0] in (1, 3, 4) and array.shape[-1] not in (1, 3, 4):
+                array = np.moveaxis(array, 0, -1)
+            if array.ndim != 3 or array.shape[-1] not in (1, 3, 4):
+                raise ValueError(f"Unsupported custom image shape: {array.shape}")
+            if float(np.nanmax(array)) > 1.0:
+                array = array / 255.0
+            array = np.nan_to_num(array, nan=0.0, posinf=1.0, neginf=0.0)
+            array = np.clip(array, 0.0, 1.0)
+            if array.shape[-1] == 4:
+                array = array[:, :, :3]
+
+            channels = len(mean_values)
+            if channels == 1 and array.shape[-1] != 1:
+                # Match torchvision's luminance conversion for MNIST inputs.
+                array = (
+                    0.299 * array[:, :, 0]
+                    + 0.587 * array[:, :, 1]
+                    + 0.114 * array[:, :, 2]
+                )[:, :, None]
+            elif channels == 3 and array.shape[-1] == 1:
+                array = np.repeat(array, 3, axis=2)
+
+            tensor = torch.from_numpy(np.ascontiguousarray(array)).permute(2, 0, 1).unsqueeze(0)
+            if center_mnist:
+                # User images often use either black-on-white or white-on-black.
+                # MNIST uses a black background, so infer polarity from the border.
+                gray = tensor[0, 0]
+                border = torch.cat((gray[0], gray[-1], gray[:, 0], gray[:, -1]))
+                if float(border.mean()) > 0.5:
+                    tensor = 1.0 - tensor
+                    gray = tensor[0, 0]
+                threshold = max(0.08, float(gray.max()) * 0.12)
+                points = torch.nonzero(gray > threshold, as_tuple=False)
+                if points.numel():
+                    y0, x0 = points.min(dim=0).values.tolist()
+                    y1, x1 = points.max(dim=0).values.tolist()
+                    cropped = tensor[:, :, y0:y1 + 1, x0:x1 + 1]
+                    height, width = cropped.shape[-2:]
+                    side = max(height, width)
+                    margin = max(2, round(side * 0.18))
+                    square_side = side + 2 * margin
+                    square = torch.zeros((1, 1, square_side, square_side), dtype=tensor.dtype)
+                    top = (square_side - height) // 2
+                    left = (square_side - width) // 2
+                    square[:, :, top:top + height, left:left + width] = cropped
+                    tensor = functional.interpolate(
+                        square, size=(20, 20), mode="bilinear", align_corners=False,
+                    )
+                    centered = torch.zeros((1, 1, size, size), dtype=tensor.dtype)
+                    offset = (size - 20) // 2
+                    centered[:, :, offset:offset + 20, offset:offset + 20] = tensor
+                    tensor = centered
+                else:
+                    tensor = torch.zeros((1, 1, size, size), dtype=tensor.dtype)
+            else:
+                tensor = functional.interpolate(
+                    tensor, size=(size, size), mode="bilinear", align_corners=False,
+                )
+            tensor = tensor.squeeze(0)
+            if padding:
+                tensor = functional.pad(tensor, (padding, padding, padding, padding))
+            display = tensor.detach().cpu().clamp(0.0, 1.0)
+            mean = torch.tensor(mean_values, dtype=tensor.dtype).view(channels, 1, 1)
+            std = torch.tensor(std_values, dtype=tensor.dtype).view(channels, 1, 1)
+            return (tensor - mean) / std, display
 
         def evaluate_modes(sample, target: int, modes, display_sample=None) -> SingleInferenceOutcome:
             preparation_ms = (perf_counter() - started) * 1_000.0
@@ -535,6 +627,28 @@ class PlatformService:
                 tuple(int(value) for value in shown.shape),
             )
 
+        if model_id == "lenet5-mnist":
+            auxiliary = Path(auxiliary_path).expanduser().resolve() if auxiliary_path else None
+            if auxiliary is None or not auxiliary.is_file():
+                raise FileNotFoundError("LeNet-5 quantization parameters were not selected")
+            model_root = root / "3_models" / "LeNet_5"
+            from .inference_runtime import get_lenet_inference_resources
+
+            resources, _cache_hit = get_lenet_inference_resources(
+                model_root=model_root, dataset_root=dataset,
+                checkpoint_path=checkpoint, quantization_path=auxiliary,
+                error_model_path=error_model, device_name=execution_device,
+            )
+            sample, display_sample = prepare_custom_image(
+                size=28, mean_values=(0.1307,), std_values=(0.3081,),
+                center_mnist=True, padding=2,
+            )
+            return evaluate_modes(sample, -1, (
+                ("float", resources.float_model),
+                ("ideal_differential", resources.ideal_model),
+                (_device_mode_name(error_model), resources.device_model),
+            ), display_sample)
+
         if model_id == "bnn-mnist":
             model_root = root / "3_models" / "BNN"
             from .inference_runtime import get_bnn_inference_resources
@@ -546,12 +660,20 @@ class PlatformService:
             )
             if not 0 <= sample_index < len(resources.dataset):
                 raise IndexError(f"MNIST test sample index must be in [0, {len(resources.dataset)-1}]")
-            sample, target = resources.dataset[sample_index]
+            if input_image is None:
+                sample, target = resources.dataset[sample_index]
+                display_sample = None
+            else:
+                sample, display_sample = prepare_custom_image(
+                    size=28, mean_values=(0.1307,), std_values=(0.3081,),
+                    center_mnist=True,
+                )
+                target = -1
             return evaluate_modes(sample, target, (
                 ("native_bnn", resources.float_model),
                 ("ideal_differential", resources.ideal_model),
                 (_device_mode_name(error_model), resources.device_model),
-            ))
+            ), display_sample)
 
         if model_id in {"resnet20-cifar10", "tinytransformer-cifar10"}:
             auxiliary = Path(auxiliary_path).expanduser().resolve() if auxiliary_path else None
@@ -574,10 +696,17 @@ class PlatformService:
             )
             if not 0 <= sample_index < len(resources.dataset):
                 raise IndexError(f"CIFAR-10 test sample index must be in [0, {len(resources.dataset)-1}]")
-            sample, target = resources.dataset[sample_index]
-            mean = torch.tensor((0.4914, 0.4822, 0.4465), dtype=sample.dtype).view(3, 1, 1)
-            std = torch.tensor((0.2470, 0.2435, 0.2616), dtype=sample.dtype).view(3, 1, 1)
-            display_sample = (sample.cpu() * std + mean).clamp(0.0, 1.0)
+            if input_image is None:
+                sample, target = resources.dataset[sample_index]
+                mean = torch.tensor((0.4914, 0.4822, 0.4465), dtype=sample.dtype).view(3, 1, 1)
+                std = torch.tensor((0.2470, 0.2435, 0.2616), dtype=sample.dtype).view(3, 1, 1)
+                display_sample = (sample.cpu() * std + mean).clamp(0.0, 1.0)
+            else:
+                sample, display_sample = prepare_custom_image(
+                    size=32, mean_values=(0.4914, 0.4822, 0.4465),
+                    std_values=(0.2470, 0.2435, 0.2616),
+                )
+                target = -1
             return evaluate_modes(sample, target, (
                 ("float", resources.float_model),
                 ("ideal_differential", resources.ideal_model),
@@ -603,16 +732,24 @@ class PlatformService:
                     f"{dataset_name} test sample index must be in "
                     f"[0, {len(resources.dataset)-1}]"
                 )
-            sample, target = resources.dataset[sample_index]
             if model_id.endswith("cifar10"):
                 mean_values = (0.4914, 0.4822, 0.4465)
                 std_values = (0.2023, 0.1994, 0.2010)
             else:
                 mean_values, std_values = (0.1307,), (0.3081,)
-            channels = len(mean_values)
-            mean = torch.tensor(mean_values, dtype=sample.dtype).view(channels, 1, 1)
-            std = torch.tensor(std_values, dtype=sample.dtype).view(channels, 1, 1)
-            display_sample = (sample.cpu() * std + mean).clamp(0.0, 1.0)
+            if input_image is None:
+                sample, target = resources.dataset[sample_index]
+                channels = len(mean_values)
+                mean = torch.tensor(mean_values, dtype=sample.dtype).view(channels, 1, 1)
+                std = torch.tensor(std_values, dtype=sample.dtype).view(channels, 1, 1)
+                display_sample = (sample.cpu() * std + mean).clamp(0.0, 1.0)
+            else:
+                sample, display_sample = prepare_custom_image(
+                    size=32 if model_id.endswith("cifar10") else 28,
+                    mean_values=mean_values, std_values=std_values,
+                    center_mnist=not model_id.endswith("cifar10"),
+                )
+                target = -1
             return evaluate_modes(sample, target, (
                 ("float", resources.float_model),
                 ("ideal_differential", resources.ideal_model),

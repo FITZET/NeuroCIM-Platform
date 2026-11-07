@@ -29,8 +29,8 @@ from lenet5.quantization import ideal_multiplication_lut, load_fitting_lut, load
 DEVICE_LUTS = {
     "NMOS": PROJECT_ROOT / "1_data_fitting/output/01_NMOS/hardware_multiplication_lut.csv",
     "CFET": PROJECT_ROOT / "1_data_fitting/output/02_CFET/hardware_multiplication_lut.csv",
-    "AOS_1": PROJECT_ROOT / "1_data_fitting/output/03_AOS_1/hardware_multiplication_lut.csv",
-    "AOS_2": PROJECT_ROOT / "1_data_fitting/output/04_AOS_2/hardware_multiplication_lut.csv",
+    "UOS_1": PROJECT_ROOT / "1_data_fitting/output/03_UOS_1/hardware_multiplication_lut.csv",
+    "UOS_2": PROJECT_ROOT / "1_data_fitting/output/04_UOS_2/hardware_multiplication_lut.csv",
 }
 STRENGTHS = (0.0, 0.1, 0.25, 0.5, 0.75, 1.0)
 

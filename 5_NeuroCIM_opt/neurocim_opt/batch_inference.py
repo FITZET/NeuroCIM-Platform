@@ -192,7 +192,8 @@ def run_grouped_batch_inference(
 
     from .inference_runtime import get_registered_inference_resources
     from .runtime_memory import (
-        is_cuda_oom, memory_aware_batch_size, release_cuda_memory,
+        empirical_cuda_batch_size, is_cuda_oom, memory_aware_batch_size,
+        release_cuda_memory,
     )
 
     requested_device = request.device.strip().lower()
@@ -243,10 +244,25 @@ def run_grouped_batch_inference(
     correct_by_mode: dict[str, list[bool]] = {name: [] for name, _ in mode_models}
     elapsed_by_mode = {name: 0.0 for name, _ in mode_models}
 
+    mib = 1024 ** 2
+    estimated_peak = {
+        "lenet5-mnist": 48 * mib,
+        "bnn-mnist": 96 * mib,
+        "resnet8-mnist": 768 * mib,
+        "tinytransformer-cifar10": 1536 * mib,
+        "resnet20-cifar10": 2 * 1024 ** 3,
+        "mobilenetv2-cifar10": 2 * 1024 ** 3,
+        "vgg11-bn-cifar10": 2 * 1024 ** 3,
+        "squeezenet1_1-cifar10": 1536 * mib,
+    }.get(model_id, 2 * 1024 ** 3)
     adaptive_batch_size, memory_snapshot = memory_aware_batch_size(
-        request.inference_batch_size, resources.device
+        request.inference_batch_size, resources.device,
+        estimated_peak_bytes_per_sample=estimated_peak,
+        estimated_host_bytes_per_sample=(4 * mib if model_id.endswith("cifar10") else mib),
     )
     minimum_batch_size = adaptive_batch_size
+    maximum_batch_size = adaptive_batch_size
+    oom_retries = 0
     runtime_device = resources.device
     cpu_fallback = False
     if progress:
@@ -258,6 +274,10 @@ def run_grouped_batch_inference(
                 f"Batch inference cancelled after {start} of {request.sample_count} samples"
             )
         end = min(start + adaptive_batch_size, request.sample_count)
+        baseline_allocated = 0
+        if runtime_device.type == "cuda":
+            baseline_allocated = int(torch.cuda.memory_allocated(runtime_device))
+            torch.cuda.reset_peak_memory_stats(runtime_device)
         samples = [resources.dataset[index] for index in range(start, end)]
         inputs = torch.stack([sample[0] for sample in samples]).to(runtime_device)
         labels = torch.tensor(
@@ -283,6 +303,7 @@ def run_grouped_batch_inference(
                 raise
             del inputs, labels
             release_cuda_memory()
+            oom_retries += 1
             if adaptive_batch_size > 1:
                 adaptive_batch_size = max(1, adaptive_batch_size // 2)
                 minimum_batch_size = min(minimum_batch_size, adaptive_batch_size)
@@ -300,7 +321,18 @@ def run_grouped_batch_inference(
         for mode in batch_correct:
             elapsed_by_mode[mode] += batch_elapsed[mode]
             correct_by_mode[mode].extend(batch_correct[mode])
+        completed_batch_size = end - start
         start = end
+        if runtime_device.type == "cuda":
+            peak_allocated = int(torch.cuda.max_memory_allocated(runtime_device))
+            adaptive_batch_size = empirical_cuda_batch_size(
+                request.inference_batch_size, adaptive_batch_size, runtime_device,
+                baseline_allocated_bytes=baseline_allocated,
+                peak_allocated_bytes=peak_allocated,
+                processed_samples=completed_batch_size,
+            )
+            maximum_batch_size = max(maximum_batch_size, adaptive_batch_size)
+        del inputs, labels
         if progress:
             progress(end, request.sample_count)
 
@@ -337,8 +369,12 @@ def run_grouped_batch_inference(
         "noise_rho": str(request.noise_rho),
         "requested_batch_size": str(request.inference_batch_size),
         "effective_min_batch_size": str(minimum_batch_size),
+        "effective_max_batch_size": str(maximum_batch_size),
+        "oom_retries": str(oom_retries),
         "cuda_free_bytes_at_start": str(memory_snapshot["free_bytes"]),
         "cuda_total_bytes": str(memory_snapshot["total_bytes"]),
+        "ram_available_bytes_at_start": str(memory_snapshot["ram_available_bytes"]),
+        "ram_total_bytes": str(memory_snapshot["ram_total_bytes"]),
         "cpu_fallback_after_cuda_oom": str(cpu_fallback),
     }
     if model_id == "bnn-mnist":

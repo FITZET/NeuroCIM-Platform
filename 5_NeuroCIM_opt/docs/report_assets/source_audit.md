@@ -111,9 +111,9 @@ g_2=a_0+a_1x+a_2w+a_3x^2+a_4xw+a_5w^2,
 
 `ErrorModelRegistry.register_fitting_run` 会把分析拟合登记为 `selectable=False`，把经验交互 LUT、一阶平滑 LUT、二阶平滑 LUT 登记为 `deployable_error_model` 和 `selectable=True`。这是防止把回归曲线误当作推理 LUT 的关键约束。
 
-### 2.4 已有 AOS1 真实证据
+### 2.4 已有 UOS1 真实证据
 
-`outputs/demo/aos1_gui/fit_result/fitting/fitting_summary.json` 记录了 `03_AOS_1.csv` 的真实结果：数据为完整 8-bit 网格，映射为 `X=VD_Digital, W=VG_Digital, output=Iout`；交互模型 `R²=0.9940709785`、`RMSE=2.9621×10^-8 A`、`MAE=1.9816×10^-8 A`、`NL_FS=5.7781%`。报告可引用这些数值，但应注明它们是“交互电流与反标定理想乘积”的指标。原始输出二次曲面拟合的 `R²=0.9999486006`，不能与交互 LUT 指标混为一谈。
+`outputs/demo/uos1_gui/fit_result/fitting/fitting_summary.json` 记录了 `03_UOS_1.csv` 的真实结果：数据为完整 8-bit 网格，映射为 `X=VD_Digital, W=VG_Digital, output=Iout`；交互模型 `R²=0.9940709785`、`RMSE=2.9621×10^-8 A`、`MAE=1.9816×10^-8 A`、`NL_FS=5.7781%`。报告可引用这些数值，但应注明它们是“交互电流与反标定理想乘积”的指标。原始输出二次曲面拟合的 `R²=0.9999486006`，不能与交互 LUT 指标混为一谈。
 
 ### 2.5 独立的阵列 MAC 回归模块
 

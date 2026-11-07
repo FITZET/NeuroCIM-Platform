@@ -18,14 +18,14 @@ if str(PLATFORM) not in sys.path:
 DEVICES = {
     "01_NMOS": {"file": "01_NMOS.csv", "output": "Ianalog"},
     "02_CFET": {"file": "02_CFET.csv", "output": "Iout"},
-    "03_AOS_1": {"file": "03_AOS_1.csv", "output": "Iout"},
-    "04_AOS_2": {"file": "04_AOS_2.csv", "output": "I"},
+    "03_UOS_1": {"file": "03_UOS_1.csv", "output": "Iout"},
+    "04_UOS_2": {"file": "04_UOS_2.csv", "output": "I"},
     "05_ideal_multiplication": {
         "file": "05_ideal_multiplication.csv", "output": "ideal_product_dec",
         "x": "input_code_dec", "w": "weight_code_dec",
     },
 }
-TRAINING_DEVICES = ("01_NMOS", "03_AOS_1")
+TRAINING_DEVICES = ("01_NMOS", "03_UOS_1")
 VARIANTS = (
     ("empirical_interaction", "实测"),
     ("smooth_interaction_order1", "低阶"),

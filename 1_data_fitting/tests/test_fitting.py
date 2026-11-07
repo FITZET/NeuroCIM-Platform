@@ -36,7 +36,7 @@ def test_nmos_report_regression() -> None:
 
 def test_normalized_visualizations_are_exported(tmp_path: Path) -> None:
     result = DataFittingService().fit(
-        PROJECT_ROOT / "0_data" / "03_AOS_1.csv",
+        PROJECT_ROOT / "0_data" / "03_UOS_1.csv",
         output_dir=tmp_path,
         config=FittingConfig(plot_dpi=80, export_point_data=False),
     )

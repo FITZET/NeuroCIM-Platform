@@ -1,4 +1,4 @@
-"""Launch the GUI and run the complete AOS1 LeNet-5 workflow once."""
+"""Launch the GUI and run the complete UOS1 LeNet-5 workflow once."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,10 +18,10 @@ from neurocim_opt.gui import ErrorAwareTrainingWidget, MainWindow, configure_win
 def main() -> int:
     error_model = (
         PLATFORM_ROOT
-        / "outputs/demo/aos1_gui/fit_result/error_model/error_model.json"
+        / "outputs/demo/uos1_gui/fit_result/error_model/error_model.json"
     ).resolve()
     dataset_root = Path(r"E:\datasets").resolve()
-    output_dir = (PLATFORM_ROOT / "outputs/aos1_workflow").resolve()
+    output_dir = (PLATFORM_ROOT / "outputs/uos1_workflow").resolve()
 
     application = QApplication.instance() or QApplication([])
     application.setApplicationName("DRAM-CIM NeuroSim Platform")
@@ -49,7 +49,7 @@ def main() -> int:
     training.device_combo.setCurrentText("cuda")
 
     window.statusBar().showMessage(
-        "AOS1: baseline inference → signed-differential error inference → "
+        "UOS1: baseline inference → signed-differential error inference → "
         "error-aware training → post-training evaluation"
     )
     window.show()

@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 import json
 import sys
 from datetime import date
@@ -128,10 +128,10 @@ eq(['RMSE=',math_radical(math_fraction(math_nary('∑',math_sup([math_sub('y','i
 eq(['MAE=',math_fraction(math_nary('∑','|y_i−ŷ_i|',lower='i=1',upper='N'),'N')],'4-12')
 eq(['NL_FS=',math_fraction('max|y_i−ŷ_i|','y_max−y_min'),'×100%'],'4-13')
 fig('4-1',ASSETS/'fig_4_1_fitting_pipeline.png','器件数据导入、拟合、LUT 构建和注册流程')
-realfit=PLATFORM/'outputs/demo/aos1_gui/fit_result/fitting'
-fig('4-2',realfit/'surface_overview.png','03_AOS_1 实际器件表面与拟合结果',14)
-fig('4-3',realfit/'normalized_lut.png','03_AOS_1 归一化硬件乘法 LUT',14)
-p('保留的 03_AOS_1 结果中，交互面 R²=0.9940709785、RMSE=2.9621×10⁻⁸ A、MAE=1.9816×10⁻⁸ A、满量程非线性=5.7781%。这些数值来自 fitting_summary.json，而非根据图形估读。')
+realfit=PLATFORM/'outputs/demo/uos1_gui/fit_result/fitting'
+fig('4-2',realfit/'surface_overview.png','03_UOS_1 实际器件表面与拟合结果',14)
+fig('4-3',realfit/'normalized_lut.png','03_UOS_1 归一化硬件乘法 LUT',14)
+p('保留的 03_UOS_1 结果中，交互面 R²=0.9940709785、RMSE=2.9621×10⁻⁸ A、MAE=1.9816×10⁻⁸ A、满量程非线性=5.7781%。这些数值来自 fitting_summary.json，而非根据图形估读。')
 
 # Chapter 5
 page(); h('第5章 正负差分存内计算模型',1)
@@ -193,7 +193,7 @@ h('7.3 图像批量推理',2)
 p('批量页面按 sample_count 截取测试集，使用 inference_batch_size 分批执行，并按 group_size 形成连续样本区间。柱状图对每一组并列显示三种模式准确率，末组允许少于 N 个样本。')
 eq(['Accuracy=',math_fraction('N_correct','N_total')],'7-3')
 eq([math_sub('Accuracy','g'),'=',math_fraction(math_nary('∑','I(ŷ_i=y_i)',lower='i∈g'),'N_g')],'7-4')
-fig('7-1',PLATFORM/'outputs/acceptance/batch_inference_aos1/batch_result_accuracy.png','实际批量推理分组准确率柱状图',14)
+fig('7-1',PLATFORM/'outputs/acceptance/batch_inference_uos1/batch_result_accuracy.png','实际批量推理分组准确率柱状图',14)
 h('7.4 GPT-2 单条与批量推理',2)
 p('勾选 GPT-2 后，同一个“单样本推理”标签切换为提示词输入和三模式文本生成，不再把模型名称与功能页面并列。批量页面接受每行一条提示词，展示浮点生成、器件生成、每条 token 一致率和三模式总耗时，并计算平均一致率。结果保存为 JSON，包含 token IDs、最后一步 Top-5 token 概率和差分层列表。')
 
@@ -232,8 +232,8 @@ p('本章只引用仓库中可复核的产物，并区分完整测试集、正�
 h('10.2 器件拟合与导入性能',2)
 table('10-1','器件拟合和数据处理证据',['项目','真实结果','证据'],[
  ('01_NMOS 交互面','R²=0.9908762695；NL=6.5784978477% FS','1_data_fitting/output/01_NMOS/fitting_summary.json'),
- ('03_AOS_1 交互面','R²=0.9940709785；NL=5.7780978235% FS','outputs/demo/aos1_gui/.../fitting_summary.json'),
- ('04_AOS_2 交互面','R²=0.9846901626','1_data_fitting/output/04_AOS_2/fitting_summary.json'),
+ ('03_UOS_1 交互面','R²=0.9940709785；NL=5.7780978235% FS','outputs/demo/uos1_gui/.../fitting_summary.json'),
+ ('04_UOS_2 交互面','R²=0.9846901626','1_data_fitting/output/04_UOS_2/fitting_summary.json'),
  ('十万行阵列 MAC 导入','4.09 MB，0.227 s，低于 3 s 目标','outputs/acceptance/performance/benchmark.json'),
  ('GUI 反例','缺列、3 bit、缺失数值均被拒绝','outputs/acceptance/gui_cell_fit/acceptance.json')])
 h('10.3 模型精度和训练',2)

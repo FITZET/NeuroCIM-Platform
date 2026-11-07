@@ -52,12 +52,12 @@
 |---|---:|---:|---:|---:|---|
 | 01_NMOS | 0.9908762695 | 1.54136×10⁻⁷ | 1.15245×10⁻⁷ | 6.57850% | [`01_NMOS/fitting_summary.json`](../../../1_data_fitting/output/01_NMOS/fitting_summary.json) |
 | 02_CFET | 0.9281507793 | 2.25192×10⁻⁷ | 1.68309×10⁻⁷ | 18.17685% | [`02_CFET/fitting_summary.json`](../../../1_data_fitting/output/02_CFET/fitting_summary.json) |
-| 03_AOS_1 | 0.9940709785 | 2.96212×10⁻⁸ | 1.98155×10⁻⁸ | 5.77810% | [`03_AOS_1/fitting_summary.json`](../../../1_data_fitting/output/03_AOS_1/fitting_summary.json) |
-| 04_AOS_2 | 0.9846901626 | 4.87017×10⁻⁸ | 3.89651×10⁻⁸ | 8.95808% | [`04_AOS_2/fitting_summary.json`](../../../1_data_fitting/output/04_AOS_2/fitting_summary.json) |
+| 03_UOS_1 | 0.9940709785 | 2.96212×10⁻⁸ | 1.98155×10⁻⁸ | 5.77810% | [`03_UOS_1/fitting_summary.json`](../../../1_data_fitting/output/03_UOS_1/fitting_summary.json) |
+| 04_UOS_2 | 0.9846901626 | 4.87017×10⁻⁸ | 3.89651×10⁻⁸ | 8.95808% | [`04_UOS_2/fitting_summary.json`](../../../1_data_fitting/output/04_UOS_2/fitting_summary.json) |
 
 可用于正文的补充证据：
 
-- AOS1 的 GUI 重新拟合结果与上述基线一致：R²=0.9940709785、RMSE=2.96212×10⁻⁸ A、非线性=5.77810%；采集位宽 8 bit、网格范围 0–255、输出原始单位 uA，拟合前换算为 A。证据：[`workflow_acceptance/aos1_gui_fit/fitting_summary.json`](../../outputs/workflow_acceptance/aos1_gui_fit/fitting/fitting_summary.json)。
+- UOS1 的 GUI 重新拟合结果与上述基线一致：R²=0.9940709785、RMSE=2.96212×10⁻⁸ A、非线性=5.77810%；采集位宽 8 bit、网格范围 0–255、输出原始单位 uA，拟合前换算为 A。证据：[`workflow_acceptance/uos1_gui_fit/fitting_summary.json`](../../outputs/workflow_acceptance/uos1_gui_fit/fitting/fitting_summary.json)。
 - 自定义列 2-bit GUI 用例有 16 行完整 4×4 网格，成功生成 256×256 推理 LUT 和 5 类图；缺列、3-bit 位宽和缺失数值均被拒绝。它是功能验收样例，不是器件精度代表值。证据：[`gui_cell_fit/acceptance.json`](../../outputs/acceptance/gui_cell_fit/acceptance.json)。
 - 阵列 MAC 理论数据共 256 点、32×32、8 bit。线性拟合 R²=0.9998356259、RMSE=0.976916、满量程非线性=0.821209%；二次多项式拟合 R²=1.0。证据：[`mac_error_model.json`](../../outputs/acceptance/mac_branch/model/mac_error_model.json)。
 - GUI 阵列选择 16×32、4 bit 的验证中，线性组 41 点 R²=1.0；已知二次扰动组 41 点的线性拟合 R²=0.9993017379、非线性=1.625%，二次拟合 R²=1.0。证据：[`array_config_metrics.json`](../../outputs/acceptance/gui_array_config/array_config_metrics.json)。
@@ -80,7 +80,7 @@
 
 训练运行耗时 31.491 s（CUDA），10 个参数张量发生变化，参数 L2 改变量 0.605139；单 epoch 训练准确率 99.7818%，验证准确率 99.9%。这是单一随机种子的工程验证，不构成统计显著性结论。
 
-注意：[`3_models/LeNet_5/output/inference_comparison.json`](../../../3_models/LeNet_5/output/inference_comparison.json) 是较早一套误差注入产物，给出 01_NMOS/02_CFET/03_AOS_1/04_AOS_2 的 97.77%/36.77%/10.10%/8.92%。其 01_NMOS 数值与当前精确四路差分结果 98.52% 不一致，因此不要把两套管线的数据合并成同一张“当前结果”表；如保留，应明确标为历史/旧管线结果。
+注意：[`3_models/LeNet_5/output/inference_comparison.json`](../../../3_models/LeNet_5/output/inference_comparison.json) 是较早一套误差注入产物，给出 01_NMOS/02_CFET/03_UOS_1/04_UOS_2 的 97.77%/36.77%/10.10%/8.92%。其 01_NMOS 数值与当前精确四路差分结果 98.52% 不一致，因此不要把两套管线的数据合并成同一张“当前结果”表；如保留，应明确标为历史/旧管线结果。
 
 ### 4.2 ResNet-20 / CIFAR-10
 
@@ -96,9 +96,9 @@
 
 | 模型/流程 | 样本规模 | 结果 | 正确分类 | 证据 |
 |---|---:|---|---|---|
-| LeNet-5 GUI 批量推理（AOS2） | 1,000 | 浮点 98.3%，理想 98.3%，器件 98.5%；总耗时 507.49 ms | 小样本/子集批量验证 | [`gui_batch_inference/batch_result.json`](../../outputs/gui_batch_inference/batch_result.json) |
+| LeNet-5 GUI 批量推理（UOS2） | 1,000 | 浮点 98.3%，理想 98.3%，器件 98.5%；总耗时 507.49 ms | 小样本/子集批量验证 | [`gui_batch_inference/batch_result.json`](../../outputs/gui_batch_inference/batch_result.json) |
 | LeNet-5 CPU 后端 | 20 | 浮点/理想 100%，器件 95% | smoke | [`batch_inference/backend_smoke.json`](../../outputs/batch_inference/backend_smoke.json) |
-| LeNet-5 AOS1 GUI 批量 | 23 | 浮点/理想 100%，器件 95.652% | 小样本 GUI 验证 | [`batch_inference_aos1/batch_result.json`](../../outputs/acceptance/batch_inference_aos1/batch_result.json) |
+| LeNet-5 UOS1 GUI 批量 | 23 | 浮点/理想 100%，器件 95.652% | 小样本 GUI 验证 | [`batch_inference_uos1/batch_result.json`](../../outputs/acceptance/batch_inference_uos1/batch_result.json) |
 | ResNet-20 GUI 批量 | 23 | 三模式均 95.652%；总耗时 2,148.03 ms | 小样本机制验证 | [`resnet20_batch/batch_result.json`](../../outputs/workflow_acceptance/resnet20_batch/batch_result.json) |
 | ResNet-20 误差训练 | 1 train batch + 1 eval batch，各 32 样本 | 前：96.875/96.875/93.75%；后：93.75/93.75/90.625%；65 个参数张量变化 | 单 batch smoke，不支持“训练提升”结论 | [`resnet20_training_smoke/training_result.json`](../../outputs/workflow_acceptance/resnet20_training_smoke/training_result.json) |
 | TinyTransformer 推理 | 4 | 三模式均 100%；总耗时 3,688.57 ms | smoke | [`tinytransformer_smoke.json`](../../outputs/inference/tinytransformer_smoke.json) |

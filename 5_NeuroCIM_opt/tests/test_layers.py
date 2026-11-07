@@ -122,6 +122,62 @@ def test_conv_matches_unfolded_linear_reference_with_padding() -> None:
 
 
 @pytest.mark.parametrize("kind", ["linear", "conv"])
+def test_ideal_fast_path_is_bit_exact_to_lut_path(kind: str) -> None:
+    """The optimized ideal kernel must preserve the former LUT result exactly."""
+    torch.manual_seed(31)
+    if kind == "linear":
+        fast = DifferentialLinear(
+            73, 19, lut=ideal_lut(), input_scale=0.021,
+            weight_scale=torch.linspace(0.003, 0.009, 19), bias=True,
+        )
+        sample = torch.randn(37, 73)
+    else:
+        fast = DifferentialConv2d(
+            3, 17, 3, lut=ideal_lut(), input_scale=0.021,
+            weight_scale=torch.linspace(0.003, 0.009, 17), padding=1, bias=True,
+        )
+        sample = torch.randn(5, 3, 11, 13)
+    if kind == "linear":
+        reference = DifferentialLinear(
+            fast.in_features, fast.out_features, lut=ideal_lut(),
+            input_scale=float(fast.input_scale), weight_scale=fast.weight_scale,
+            bias=fast.bias is not None,
+        )
+    else:
+        reference = DifferentialConv2d(
+            fast.in_channels, fast.out_channels, fast.kernel_size,
+            lut=ideal_lut(), input_scale=float(fast.input_scale),
+            weight_scale=fast.weight_scale, padding=fast.padding,
+            bias=fast.bias is not None,
+        )
+    reference.load_state_dict(fast.state_dict(), strict=False)
+    reference._ideal_product_lut = False
+    assert torch.equal(fast(sample), reference(sample))
+
+
+def test_quantized_weight_cache_refreshes_after_parameter_update() -> None:
+    torch.manual_seed(37)
+    layer = DifferentialLinear(
+        17, 9, lut=ideal_lut(), input_scale=0.02,
+        weight_scale=torch.full((9,), 0.004), bias=False,
+    )
+    sample = torch.randn(6, 17)
+    layer(sample)  # populate the cache
+    cached_version = layer._cached_weight_version
+    with torch.no_grad():
+        layer.weight.add_(0.017)
+    actual = layer(sample)
+    assert layer._cached_weight_version > cached_version
+    reference = DifferentialLinear(
+        17, 9, lut=ideal_lut(), input_scale=0.02,
+        weight_scale=torch.full((9,), 0.004), bias=False,
+    )
+    reference.load_state_dict(layer.state_dict(), strict=False)
+    reference._ideal_product_lut = False
+    assert torch.equal(actual, reference(sample))
+
+
+@pytest.mark.parametrize("kind", ["linear", "conv"])
 def test_ste_has_exact_forward_and_updates_weights(kind: str) -> None:
     torch.manual_seed(7)
     if kind == "linear":

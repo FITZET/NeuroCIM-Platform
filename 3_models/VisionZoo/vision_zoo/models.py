@@ -98,12 +98,68 @@ def vgg11_bn_cifar10(*, num_classes: int = 10) -> nn.Module:
     return cifar10_vgg11_bn(pretrained=False, num_classes=num_classes)
 
 
-def squeezenet1_1_cifar10(*, num_classes: int = 10) -> nn.Module:
-    # Torchvision's current implementation uses adaptive pooling, so the
-    # official 1.1 graph accepts native 32x32 CIFAR images.
-    from torchvision.models import squeezenet1_1
+class CifarFire(nn.Module):
+    """Fire block adapted for native 32x32 inputs with stable BN training."""
 
-    return squeezenet1_1(weights=None, num_classes=num_classes)
+    def __init__(self, in_channels: int, squeeze_channels: int, expand_channels: int) -> None:
+        super().__init__()
+        self.squeeze = nn.Sequential(
+            nn.Conv2d(in_channels, squeeze_channels, 1, bias=False),
+            nn.BatchNorm2d(squeeze_channels), nn.ReLU(inplace=True),
+        )
+        self.expand1x1 = nn.Sequential(
+            nn.Conv2d(squeeze_channels, expand_channels, 1, bias=False),
+            nn.BatchNorm2d(expand_channels),
+        )
+        self.expand3x3 = nn.Sequential(
+            nn.Conv2d(squeeze_channels, expand_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(expand_channels),
+        )
+        self.activation = nn.ReLU(inplace=True)
+
+    def forward(self, value: Tensor) -> Tensor:
+        value = self.squeeze(value)
+        return self.activation(torch.cat((self.expand1x1(value), self.expand3x3(value)), 1))
+
+
+class CifarSqueezeNet(nn.Module):
+    """SqueezeNet topology specialized for CIFAR-10's native 32x32 grid."""
+
+    def __init__(self, num_classes: int = 10) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 96, 3, padding=1, bias=False),
+            nn.BatchNorm2d(96), nn.ReLU(inplace=True), nn.MaxPool2d(2),
+            CifarFire(96, 16, 64), CifarFire(128, 16, 64),
+            CifarFire(128, 32, 128), nn.MaxPool2d(2),
+            CifarFire(256, 32, 128), CifarFire(256, 48, 192),
+            CifarFire(384, 48, 192), CifarFire(384, 64, 256),
+            nn.MaxPool2d(2), CifarFire(512, 64, 256),
+        )
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5), nn.Conv2d(512, num_classes, 1),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self._initialize()
+
+    def _initialize(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def forward(self, value: Tensor) -> Tensor:
+        return torch.flatten(self.classifier(self.features(value)), 1)
+
+
+def squeezenet1_1_cifar10(*, num_classes: int = 10) -> nn.Module:
+    """Create the native-CIFAR SqueezeNet graph used by the platform."""
+
+    return CifarSqueezeNet(num_classes=num_classes)
 
 
 FACTORIES: dict[str, Callable[[], nn.Module]] = {

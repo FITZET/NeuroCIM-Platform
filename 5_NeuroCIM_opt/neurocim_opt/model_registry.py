@@ -34,6 +34,11 @@ class ModelSpec:
     source_url: str = ""
     source_version: str = ""
     weight_sha256: str | None = None
+    report_task: str = ""
+    report_dataset: str = ""
+    report_baseline: str = ""
+    model_family: str = ""
+    verified_baseline: str = ""
 
     @property
     def checkpoint_available(self) -> bool:
@@ -127,6 +132,9 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             source_url="https://github.com/FITZET/NeuroCIM-Platform",
             source_version="project-lenet5-v1",
             weight_sha256="48c47fbbdeb4d8e4b71762d421d78d4e45496a5fbc97d6dbe4410900ace37825",
+            report_task="手写数字识别", report_dataset="MNIST",
+            report_baseline="98.69%", model_family="经典 CNN",
+            verified_baseline="98.69%（完整测试集）",
         )
     )
     vision_models = (
@@ -140,7 +148,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             "b5130a0b3234d947dd0cbabb90f11631c1e25f23289c55cbc4a41b7ee0a986ed",
         ),
         (
-            "mobilenetv2-cifar10", "MobileNetV2 x1.0", "cifar10",
+            "mobilenetv2-cifar10", "MobileNetV2", "cifar10",
             "mobilenetv2_x1_0_cifar10",
             vision_root / "checkpoint/cifar10_mobilenetv2_x1_0-fe6a5b48.pt",
             vision_root / "checkpoint/mobilenetv2-cifar10_input_scales.json",
@@ -152,7 +160,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             "fe6a5b4808c9b1b7a440c02fa19a10dc3d8ea5c63e38381b2f60b1937958735e",
         ),
         (
-            "vgg11-bn-cifar10", "VGG11-BN", "cifar10", "vgg11_bn_cifar10",
+            "vgg11-bn-cifar10", "VGG11", "cifar10", "vgg11_bn_cifar10",
             vision_root / "checkpoint/cifar10_vgg11_bn-eaeebf42.pt",
             vision_root / "checkpoint/vgg11-bn-cifar10_input_scales.json",
             (3, 32, 32), cifar10_classes,
@@ -163,15 +171,15 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             "eaeebf42370c92fdfbb5dbe8eba7c27d4eb7366a1dca0b5be435364ccdf54378",
         ),
         (
-            "squeezenet1_1-cifar10", "SqueezeNet 1.1", "cifar10",
+            "squeezenet1_1-cifar10", "SqueezeNet", "cifar10",
             "squeezenet1_1_cifar10",
             vision_root / "checkpoint/squeezenet1_1_cifar10.pt",
             vision_root / "checkpoint/squeezenet1_1-cifar10_input_scales.json",
             (3, 32, 32), cifar10_classes,
             (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010),
             "torchvision BSD-3-Clause; CIFAR-10 dataset terms apply",
-            "https://github.com/pytorch/vision", "v0.19.0-squeezenet1_1",
-            "df967fd502b9d8fe2e7dea77d8363ad7fe14df04efcc173df1f94fc05f7cfe4c",
+            "https://github.com/pytorch/vision", "cifar-native-fire-bn-seed42-160ep",
+            "5fe061ba144cc2b9890b47b3a395d36c7195051aea894bbaed3a245694fde196",
         ),
     )
     for (
@@ -194,6 +202,26 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             class_names=classes, normalization_mean=mean, normalization_std=std,
             capabilities=image_capabilities, source_url=source,
             source_version=version, weight_sha256=actual_sha256,
+            report_task="手写数字识别" if dataset == "mnist" else "图像分类",
+            report_dataset="MNIST" if dataset == "mnist" else "CIFAR-10",
+            report_baseline={
+                "resnet8-mnist": "95.00%",
+                "mobilenetv2-cifar10": "84.00%",
+                "vgg11-bn-cifar10": "85.00%",
+                "squeezenet1_1-cifar10": "81.00%",
+            }.get(model_id, ""),
+            model_family={
+                "resnet8-mnist": "残差 CNN",
+                "mobilenetv2-cifar10": "轻量 CNN",
+                "vgg11-bn-cifar10": "高算力 CNN",
+                "squeezenet1_1-cifar10": "超轻量 CNN",
+            }.get(model_id, ""),
+            verified_baseline={
+                "resnet8-mnist": "99.36%（完整测试集）",
+                "mobilenetv2-cifar10": "94.05%（完整测试集）",
+                "vgg11-bn-cifar10": "92.78%（完整测试集）",
+                "squeezenet1_1-cifar10": "91.68%（完整测试集）",
+            }.get(model_id, ""),
         ))
     registry.register(
         ModelSpec(
@@ -221,20 +249,23 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             factory="bnn.model:BinaryMNIST",
             checkpoint=bnn_root / "checkpoint/bnn_mnist.pt",
             input_shape=(1, 28, 28), metrics=("accuracy", "loss"),
-            license="project implementation; MNIST dataset terms apply",
+            license="MIT (RWTH-IDS); MNIST dataset terms apply",
             model_root=bnn_root, dataset_root=mnist_root,
             class_names=mnist_classes,
-            normalization_mean=(0.1307,), normalization_std=(0.3081,),
+            normalization_mean=(0.0,), normalization_std=(1.0,),
             capabilities=image_capabilities,
-            source_url="https://github.com/FITZET/NeuroCIM-Platform",
-            source_version="binary-mnist-v1",
-            weight_sha256="c7b9f3447864c8848ada6d46b65d129e90ac48440462530bb5d3a148636e695c",
+            source_url="https://github.com/RWTH-IDS/efficient-binary-neural-networks",
+            source_version="LeNet5-binary-checkpoint-2024-01-22",
+            weight_sha256="533fbf1c32885c02660cde2d440f91ca0c9f234d6489d2b6e900e27badc1f1bb",
+            report_task="手写数字识别", report_dataset="MNIST",
+            report_baseline="99.00%", model_family="二值网络",
+            verified_baseline="99.19%（完整测试集）",
         )
     )
     registry.register(
         ModelSpec(
             model_id="tinytransformer-cifar10",
-            display_name="TinyTransformer (CCT-7/3x1)",
+            display_name="TinyTransformer",
             task="image_classification", datasets=("cifar10",),
             factory="tiny_transformer:cct_7_3x1_32",
             checkpoint=tiny_root / "checkpoint/cct_7_3x1_32_cifar10.pth",
@@ -249,6 +280,9 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             source_url="https://github.com/SHI-Labs/Compact-Transformers",
             source_version="cct_7_3x1_32",
             weight_sha256="8abfcd3d98674cd5b6fe07361f37001f7d2ebe57f513e5cc724ccdc8790204fe",
+            report_task="情感分类", report_dataset="合成数据",
+            report_baseline="99.60%", model_family="轻量语言模型",
+            verified_baseline="待迁移：当前为 CIFAR-10 图像分类 96.53%（完整测试集）",
         )
     )
     registry.register(
@@ -275,12 +309,17 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
     )
     gpt2_large_root = gpt2_root / "checkpoint/gpt2-large"
     wikitext2_root = gpt2_large_root / "wikitext-2-raw-v1"
+    gpt2_large_runtime = gpt2_large_root / "model.fp16.safetensors"
+    gpt2_large_checkpoint = (
+        gpt2_large_runtime if gpt2_large_runtime.is_file()
+        else gpt2_large_root / "model.safetensors"
+    )
     registry.register(
         ModelSpec(
-            model_id="gpt2-large", display_name="GPT-2 Large",
+            model_id="gpt2-large", display_name="GPT-2-large",
             task="text_generation", datasets=("wikitext2",),
             factory="gpt2_cim:gpt2_large",
-            checkpoint=gpt2_large_root / "model.safetensors",
+            checkpoint=gpt2_large_checkpoint,
             input_shape=(1024,), metrics=("loss", "perplexity", "token_agreement"),
             license="OpenAI GPT-2 modified MIT; WikiText CC BY-SA 3.0/GFDL",
             model_root=gpt2_root,
@@ -300,7 +339,14 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             ),
             source_url="https://github.com/openai/gpt-2",
             source_version="HF-32b71b12589c2f8d625668d2335a01cac3249519",
-            weight_sha256="5f47f3e12f91cd33b662ce7e433b6150ad5512b5884a2cee961b50e9c3bbebce",
+            weight_sha256=(
+                "9008e91f3c248005e27aa0a258f334029cccdd32f700a9c459b143b3eb1eccc3"
+                if gpt2_large_checkpoint == gpt2_large_runtime else
+                "5f47f3e12f91cd33b662ce7e433b6150ad5512b5884a2cee961b50e9c3bbebce"
+            ),
+            report_task="语言建模", report_dataset="WikiText-2",
+            report_baseline="PPL=30.69", model_family="大语言模型",
+            verified_baseline="PPL=15.02（2048 token 冒烟；完整 WikiText-2 待复验）",
         )
     )
     return registry

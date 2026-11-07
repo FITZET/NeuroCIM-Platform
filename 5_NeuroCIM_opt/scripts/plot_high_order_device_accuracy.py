@@ -37,10 +37,10 @@ def plot_grouped(
     output_name: str,
 ) -> None:
     nmos_column = f"01_NMOS_{order_column}_{stage}"
-    aos_column = f"03_AOS_1_{order_column}_{stage}"
+    uos_column = f"03_UOS_1_{order_column}_{stage}"
     labels = [f"{model}\n({dataset})" for model, dataset in zip(frame["网络"], frame["数据集"])]
     nmos = frame[nmos_column].astype(float).to_numpy()
-    aos1 = frame[aos_column].astype(float).to_numpy()
+    uos1 = frame[uos_column].astype(float).to_numpy()
 
     x = np.arange(len(frame))
     width = 0.34
@@ -56,11 +56,11 @@ def plot_grouped(
         hatch="//",
         zorder=3,
     )
-    bars_aos = ax.bar(
+    bars_uos = ax.bar(
         x + width / 2,
-        aos1,
+        uos1,
         width,
-        label="AOS1",
+        label="UOS1",
         color="#3678B5",
         edgecolor="#1E4E78",
         linewidth=0.8,
@@ -82,7 +82,7 @@ def plot_grouped(
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(loc="upper center", ncols=2, frameon=False)
 
-    for bars in (bars_nmos, bars_aos):
+    for bars in (bars_nmos, bars_uos):
         ax.bar_label(
             bars,
             labels=[f"{value * 100:.2f}%" for value in bars.datavalues],
@@ -102,7 +102,7 @@ def main() -> None:
     frame = pd.read_csv(SOURCE)
     required = {"网络", "数据集"}
     for order in ("低阶", "高阶"):
-        for device in ("01_NMOS", "03_AOS_1"):
+        for device in ("01_NMOS", "03_UOS_1"):
             for stage in ("训练前", "训练后"):
                 required.add(f"{device}_{order}_{stage}")
     missing = required.difference(frame.columns)
@@ -115,9 +115,9 @@ def main() -> None:
                 "网络",
                 "数据集",
                 f"01_NMOS_{order}_训练前",
-                f"03_AOS_1_{order}_训练前",
+                f"03_UOS_1_{order}_训练前",
                 f"01_NMOS_{order}_训练后",
-                f"03_AOS_1_{order}_训练后",
+                f"03_UOS_1_{order}_训练后",
             ]
         ].copy()
         report.to_csv(

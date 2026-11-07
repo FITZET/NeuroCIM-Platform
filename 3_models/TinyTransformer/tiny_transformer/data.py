@@ -41,8 +41,11 @@ def create_cifar10_loaders(
     return (
         DataLoader(Subset(augmented, training_indices), batch_size=batch_size, shuffle=True,
                    generator=torch.Generator().manual_seed(seed), num_workers=num_workers,
-                   worker_init_fn=_seed_worker, pin_memory=torch.cuda.is_available()),
+                   worker_init_fn=_seed_worker, pin_memory=torch.cuda.is_available(),
+                   persistent_workers=num_workers > 0),
         DataLoader(Subset(evaluation, validation_indices), batch_size=eval_batch_size,
-                   shuffle=False, num_workers=num_workers),
-        DataLoader(test, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers),
+                   shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available(),
+                   persistent_workers=num_workers > 0),
+        DataLoader(test, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers,
+                   pin_memory=torch.cuda.is_available(), persistent_workers=num_workers > 0),
     )

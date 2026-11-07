@@ -1,4 +1,4 @@
-"""Record a real AOS1 cell-fitting GUI walkthrough as an MP4 file."""
+"""Record a real UOS1 cell-fitting GUI walkthrough as an MP4 file."""
 from __future__ import annotations
 
 import json
@@ -32,11 +32,11 @@ def frame_from(window: MainWindow) -> np.ndarray:
 
 
 def main() -> int:
-    source = (PROJECT_ROOT / "0_data" / "03_AOS_1.csv").resolve()
-    output = (PLATFORM_ROOT / "outputs" / "demo" / "aos1_gui").resolve()
+    source = (PROJECT_ROOT / "0_data" / "03_UOS_1.csv").resolve()
+    output = (PLATFORM_ROOT / "outputs" / "demo" / "uos1_gui").resolve()
     fit_output = output / "fit_result"
-    video_path = output / "AOS1_GUI_demo.mp4"
-    metadata_path = output / "AOS1_GUI_demo.json"
+    video_path = output / "UOS1_GUI_demo.mp4"
+    metadata_path = output / "UOS1_GUI_demo.json"
     output.mkdir(parents=True, exist_ok=True)
 
     application = QApplication.instance() or QApplication([])
@@ -66,10 +66,10 @@ def main() -> int:
             time.sleep(1 / FPS)
 
     try:
-        window.statusBar().showMessage("AOS1 demo 1/4 - Open device error fitting")
+        window.statusBar().showMessage("UOS1 demo 1/4 - Open device error fitting")
         record(2.0)
 
-        # AOS1 uses the standard aliases VD_Digital/VD/VG_Digital/VG/Iout.
+        # UOS1 uses the standard aliases VD_Digital/VD/VG_Digital/VG/Iout.
         cell.path_edit.setText(str(source))
         cell.output_edit.setText(str(fit_output))
         for combo in cell.mapping_edits.values():
@@ -85,28 +85,28 @@ def main() -> int:
         cell.vd_unit_edit.setText("V")
         cell.vg_unit_edit.setText("V")
         cell.output_unit_edit.setText("A")
-        window.statusBar().showMessage("AOS1 demo 2/4 - 8-bit standard columns, units V/V/A")
+        window.statusBar().showMessage("UOS1 demo 2/4 - 8-bit standard columns, units V/V/A")
         record(3.0)
 
         cell.preview()
         application.processEvents()
         if cell.table.rowCount() == 0:
             raise RuntimeError(cell.summary.text())
-        window.statusBar().showMessage("AOS1 demo 3/4 - Preview validated; start background fitting")
+        window.statusBar().showMessage("UOS1 demo 3/4 - Preview validated; start background fitting")
         record(3.0)
 
         cell.start_fit(fit_output)
         deadline = time.monotonic() + 180.0
         while cell.worker is not None and cell.worker.isRunning():
             if time.monotonic() > deadline:
-                raise TimeoutError("AOS1 fitting exceeded 180 seconds")
+                raise TimeoutError("UOS1 fitting exceeded 180 seconds")
             application.processEvents()
             writer.write(frame_from(window))
             time.sleep(1 / FPS)
         application.processEvents()
         if cell.last_outcome is None:
             raise RuntimeError(cell.summary.text())
-        window.statusBar().showMessage("AOS1 demo 4/4 - Fitting complete; model, metrics and plots saved")
+        window.statusBar().showMessage("UOS1 demo 4/4 - Fitting complete; model, metrics and plots saved")
         record(6.0)
 
         outcome = cell.last_outcome

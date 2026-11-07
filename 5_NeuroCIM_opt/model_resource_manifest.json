@@ -16,10 +16,10 @@
       "model_id": "bnn-mnist",
       "checkpoint": "3_models/BNN/checkpoint/bnn_mnist.pt",
       "auxiliary": [],
-      "sha256": "c7b9f3447864c8848ada6d46b65d129e90ac48440462530bb5d3a148636e695c",
+      "sha256": "533fbf1c32885c02660cde2d440f91ca0c9f234d6489d2b6e900e27badc1f1bb",
       "dataset": "data/mnist",
-      "source": "https://github.com/FITZET/NeuroCIM-Platform",
-      "version": "binary-mnist-v1"
+      "source": "https://github.com/RWTH-IDS/efficient-binary-neural-networks",
+      "version": "LeNet5-binary-checkpoint-2024-01-22"
     },
     {
       "model_id": "resnet20-cifar10",
@@ -57,7 +57,7 @@
     },
     {
       "model_id": "gpt2-large",
-      "checkpoint": "3_models/GPT2/checkpoint/gpt2-large/model.safetensors",
+      "checkpoint": "3_models/GPT2/checkpoint/gpt2-large/model.fp16.safetensors",
       "auxiliary": [
         "3_models/GPT2/checkpoint/gpt2-large/config.json",
         "3_models/GPT2/checkpoint/gpt2-large/merges.txt",
@@ -67,7 +67,7 @@
         "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1/wiki.valid.raw",
         "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1/wiki.test.raw"
       ],
-      "sha256": "5f47f3e12f91cd33b662ce7e433b6150ad5512b5884a2cee961b50e9c3bbebce",
+      "sha256": "9008e91f3c248005e27aa0a258f334029cccdd32f700a9c459b143b3eb1eccc3",
       "dataset": "3_models/GPT2/checkpoint/gpt2-large/wikitext-2-raw-v1",
       "source": "https://github.com/openai/gpt-2",
       "version": "HF-32b71b12589c2f8d625668d2335a01cac3249519"
@@ -111,10 +111,10 @@
       "auxiliary": [
         "3_models/VisionZoo/checkpoint/squeezenet1_1-cifar10_input_scales.json"
       ],
-      "sha256": "df967fd502b9d8fe2e7dea77d8363ad7fe14df04efcc173df1f94fc05f7cfe4c",
+      "sha256": "5fe061ba144cc2b9890b47b3a395d36c7195051aea894bbaed3a245694fde196",
       "dataset": "data/cifar10",
       "source": "https://github.com/pytorch/vision",
-      "version": "v0.19.0-squeezenet1_1"
+      "version": "cifar-native-fire-bn-seed42-160ep"
     }
   ]
 }

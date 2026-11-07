@@ -9,7 +9,8 @@ from torchvision import datasets, transforms
 
 def create_loaders(root: Path, batch_size: int, eval_batch_size: int, seed: int,
                    num_workers: int = 0, validation_size: int = 5000):
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
+    # The published checkpoint was trained directly on MNIST pixels in [0, 1].
+    transform = transforms.ToTensor()
     full = datasets.MNIST(root=root, train=True, transform=transform, download=False)
     train, validation = random_split(
         full, [len(full) - validation_size, validation_size],

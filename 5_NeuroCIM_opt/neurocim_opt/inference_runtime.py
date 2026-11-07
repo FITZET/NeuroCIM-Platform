@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from copy import deepcopy
+import gc
 from pathlib import Path
 import sys
 from threading import RLock
@@ -52,6 +53,33 @@ _REGISTERED_CACHE: dict[tuple[Any, ...], RegisteredInferenceResources] = {}
 _HITS = 0
 _MISSES = 0
 _INVALIDATIONS = 0
+
+
+def _remember_single_resource(cache: dict, key: tuple[Any, ...], resources: Any) -> None:
+    """Keep only the most recently used three-mode model bundle globally.
+
+    One bundle already contains float, ideal-differential and device models.
+    Retaining bundles for every model/error-file combination eventually fills
+    both RAM and VRAM in a long-lived GUI, so model switches evict the previous
+    bundle while repeated runs of the active configuration remain cache hits.
+    """
+
+    evicted = []
+    for mapping in (_CACHE, _REGISTERED_CACHE):
+        for old_key in list(mapping):
+            if mapping is cache and old_key == key:
+                continue
+            evicted.append(mapping.pop(old_key))
+    cache[key] = resources
+    if evicted:
+        evicted.clear()
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 def _signature(path: Path, purpose: str) -> ResourceSignature:
@@ -115,7 +143,9 @@ def clear_lenet_inference_cache() -> None:
 
 def lenet_inference_cache_info() -> InferenceCacheInfo:
     with _LOCK:
-        return InferenceCacheInfo(_HITS, _MISSES, _INVALIDATIONS, len(_CACHE))
+        return InferenceCacheInfo(
+            _HITS, _MISSES, _INVALIDATIONS, len(_CACHE) + len(_REGISTERED_CACHE)
+        )
 
 
 def get_lenet_inference_resources(
@@ -203,7 +233,7 @@ def get_lenet_inference_resources(
             device_model=device_model,
             device=device,
         )
-        _CACHE[key] = resources
+        _remember_single_resource(_CACHE, key, resources)
         return resources, False
 
 
@@ -331,7 +361,7 @@ def get_vision_zoo_inference_resources(
             float_model=float_model, ideal_model=ideal_model,
             device_model=device_model, device=device,
         )
-        _REGISTERED_CACHE[key] = resources
+        _remember_single_resource(_REGISTERED_CACHE, key, resources)
         return resources, False
 
 
@@ -425,7 +455,7 @@ def get_resnet20_inference_resources(
             device_model=device_model,
             device=device,
         )
-        _REGISTERED_CACHE[key] = resources
+        _remember_single_resource(_REGISTERED_CACHE, key, resources)
         return resources, False
 
 
@@ -514,7 +544,7 @@ def get_bnn_inference_resources(
             device_model=device_model,
             device=device,
         )
-        _REGISTERED_CACHE[key] = resources
+        _remember_single_resource(_REGISTERED_CACHE, key, resources)
         return resources, False
 
 

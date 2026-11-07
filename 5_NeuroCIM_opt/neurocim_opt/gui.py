@@ -6,12 +6,13 @@ import json
 import os
 from pathlib import Path
 import traceback
+from time import monotonic
 from typing import Any
 
 import numpy as np
 
 from PySide6.QtCore import QEvent, QObject, QSize, QSettings, QThread, QTimer, Signal, Qt
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase, QImage, QPixmap, QPixmapCache
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QImage, QPainter, QPen, QPixmap, QPixmapCache
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox as _QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -55,6 +56,17 @@ VISION_ZOO_MODEL_IDS = frozenset({
     "resnet8-mnist", "mobilenetv2-cifar10", "vgg11-bn-cifar10",
     "squeezenet1_1-cifar10",
 })
+FRONTEND_MODEL_IDS = (
+    "lenet5-mnist",
+    "resnet8-mnist",
+    "mobilenetv2-cifar10",
+    "vgg11-bn-cifar10",
+    "squeezenet1_1-cifar10",
+    "bnn-mnist",
+    "tinytransformer-cifar10",
+    "gpt2-large",
+)
+FRONTEND_MODEL_ID_SET = frozenset(FRONTEND_MODEL_IDS)
 RUNTIME_CALIBRATED_MODEL_IDS = frozenset({"bnn-mnist"})
 NOISE_LEVELS = (
     ("档位 1：关闭附加随机噪声", (0.0, 0.0)),
@@ -80,13 +92,30 @@ def _setup_adc_combo(combo: QComboBox) -> None:
 def _populate_image_model_combo(combo: _QComboBox, project_root: Path, capability: str):
     """Populate a selector from registry capability and actual checkpoint state."""
     registry = builtin_registry(project_root)
-    for spec in registry.list(task="image_classification", capability=capability):
+    for spec in _frontend_model_specs(
+        registry, task="image_classification", capability=capability
+    ):
         combo.addItem(spec.display_name, spec.model_id)
         item = combo.model().item(combo.count() - 1)
         if item is not None and not spec.checkpoint_available:
             item.setEnabled(False)
             item.setToolTip(f"正式 Checkpoint 尚未安装：{spec.checkpoint}")
     return registry
+
+
+def _frontend_model_specs(registry, *, task: str | None = None,
+                          capability: str | None = None):
+    """Return the deliberately small, ordered model list exposed by the GUI."""
+
+    specs = []
+    for model_id in FRONTEND_MODEL_IDS:
+        spec = registry.get(model_id)
+        if task is not None and spec.task != task:
+            continue
+        if capability is not None and not spec.supports(capability):
+            continue
+        specs.append(spec)
+    return tuple(specs)
 
 
 def _high_dpi_pixmap(
@@ -382,12 +411,13 @@ class WorkflowCoordinator(QObject):
         if selected:
             try:
                 spec = self.model_registry.get(str(selected["model_id"]))
-                if spec.resources_available:
+                if spec.model_id in FRONTEND_MODEL_ID_SET and spec.resources_available:
                     return spec.model_id
             except KeyError:
                 pass
-        ready = [item for item in self.model_registry.list() if item.resources_available]
-        return (ready[0] if ready else self.model_registry.list()[0]).model_id
+        visible = _frontend_model_specs(self.model_registry)
+        ready = [item for item in visible if item.resources_available]
+        return (ready[0] if ready else visible[0]).model_id
 
     def select_network_model(self, model_id: str) -> dict[str, Any]:
         spec = self.model_registry.get(model_id)
@@ -877,7 +907,8 @@ class InferenceThread(QThread):
                  sample_index: int, dataset_root: Path, checkpoint: Path,
                  auxiliary: Path | None, error_model: Path, device: str,
                  adc_bits: int | None = None, noise_sigma: float = 0.0,
-                 noise_rho: float = 0.0):
+                 noise_rho: float = 0.0,
+                 input_image: str | Path | np.ndarray | None = None):
         super().__init__()
         self.service = service
         self.project_root = project_root
@@ -889,6 +920,7 @@ class InferenceThread(QThread):
         self.error_model = error_model
         self.device = device
         self.adc_bits = adc_bits; self.noise_sigma = noise_sigma; self.noise_rho = noise_rho
+        self.input_image = input_image
 
     def run(self) -> None:
         try:
@@ -899,6 +931,7 @@ class InferenceThread(QThread):
                     auxiliary_path=self.auxiliary, error_model_path=self.error_model,
                     device=self.device, adc_bits=self.adc_bits,
                     noise_sigma=self.noise_sigma, noise_rho=self.noise_rho,
+                    input_image=self.input_image,
                 )
             )
         except Exception as exc:
@@ -1085,6 +1118,15 @@ class WikiText2EvaluationThread(QThread):
             self.cancelled.emit(str(exc))
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+def _retire_widget_worker(widget: QWidget) -> None:
+    """Release a completed QThread instead of retaining it for the GUI lifetime."""
+
+    worker = getattr(widget, "worker", None)
+    if isinstance(worker, QThread) and not worker.isRunning():
+        widget.worker = None
+        worker.deleteLater()
 
 
 class CellFittingWidget(QWidget):
@@ -1436,13 +1478,14 @@ class CellFittingWidget(QWidget):
 
     def _fit_finished(self) -> None:
         self.fit_button.setEnabled(True); self.preview_button.setEnabled(True); self.progress.setValue(100 if self.last_outcome else 0)
+        _retire_widget_worker(self)
 
     def _show_error(self, title: str, error: Exception) -> None:
         message = f"{title}: {error}"; self.summary.setText(message); self.log.appendPlainText(message)
 
     def _restore_settings(self) -> None:
         saved_source = str(self.settings.value("cell/source", "")).strip()
-        bundled_source = self.platform_root.parent / "0_data" / "03_AOS_1.csv"
+        bundled_source = self.platform_root.parent / "0_data" / "03_UOS_1.csv"
         if (not saved_source or not Path(saved_source).expanduser().is_file()) and bundled_source.is_file():
             saved_source = str(bundled_source)
         self.path_edit.setText(saved_source); self.output_edit.setText(str(self.settings.value("cell/output", "")))
@@ -1649,6 +1692,7 @@ class MacAnalysisWidget(QWidget):
     def _fit_finished(self) -> None:
         self.progress.setRange(0, 100); self.progress.setValue(100 if self.last_results else 0)
         self.fit_button.setEnabled(True); self.preview_button.setEnabled(True)
+        _retire_widget_worker(self)
 
     def export_results(self) -> None:
         if not self.last_results: return
@@ -1689,6 +1733,104 @@ class MacAnalysisWidget(QWidget):
         self.settings.setValue("mac/bit_width", self.bit_width.currentData())
         for key, edit in self.mapping_edits.items(): self.settings.setValue(f"mac/mapping/{key}", edit.text().strip())
 
+class MnistDrawingCanvas(QWidget):
+    """Black canvas with a white round pen, suitable for MNIST input."""
+
+    changed = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFixedSize(252, 252)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self._image = QImage(252, 252, QImage.Format.Format_Grayscale8)
+        self._image.fill(0)
+        self._last_position = None
+
+    def clear(self) -> None:
+        self._image.fill(0)
+        self._last_position = None
+        self.update()
+        self.changed.emit()
+
+    def image_array(self) -> np.ndarray:
+        image = self._image.convertToFormat(QImage.Format.Format_Grayscale8)
+        view = np.frombuffer(image.bits(), dtype=np.uint8, count=image.sizeInBytes())
+        return view.reshape(image.height(), image.bytesPerLine())[:, :image.width()].copy()
+
+    def has_ink(self) -> bool:
+        return bool(np.any(self.image_array()))
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.drawImage(self.rect(), self._image)
+        painter.setPen(QPen(QColor("#60738D"), 2))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_position = event.position()
+            self._draw_to(event.position())
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._draw_to(event.position())
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._draw_to(event.position())
+            self._last_position = None
+
+    def _draw_to(self, position) -> None:
+        painter = QPainter(self._image)
+        pen = QPen(QColor("white"), 18, Qt.PenStyle.SolidLine,
+                   Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        start = self._last_position if self._last_position is not None else position
+        painter.drawLine(start, position)
+        painter.end()
+        self._last_position = position
+        self.update()
+        self.changed.emit()
+
+
+class CurrentPageStackedWidget(QStackedWidget):
+    """Size a stack from its visible page instead of its largest page."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.currentChanged.connect(self._refresh_geometry)
+
+    def sizeHint(self) -> QSize:
+        current = self.currentWidget()
+        if current is None:
+            return super().sizeHint()
+        return QSize(super().sizeHint().width(), current.sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:
+        current = self.currentWidget()
+        if current is None:
+            return super().minimumSizeHint()
+        return QSize(0, current.minimumSizeHint().height())
+
+    def _refresh_geometry(self, _index: int) -> None:
+        self.fitCurrentPage()
+
+    def fitCurrentPage(self) -> None:
+        """Hard-limit the stack to the active page's layout height."""
+
+        current = self.currentWidget()
+        if current is None:
+            return
+        height = max(1, current.sizeHint().height())
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.updateGeometry()
+        parent_layout = self.parentWidget().layout() if self.parentWidget() else None
+        if parent_layout is not None:
+            parent_layout.invalidate()
+
+
 class SingleInferenceWidget(QWidget):
     """Selectable single-sample inference with image and Top-5 evidence."""
 
@@ -1703,8 +1845,34 @@ class SingleInferenceWidget(QWidget):
         self.worker: InferenceThread | None = None
         self.last_outcome: SingleInferenceOutcome | None = None
         self._active_model_id = ""
+        self._active_input_description = "数据集样本"
         layout = QVBoxLayout(self)
         self.setProperty("usesIndependentColumnScroll", True)
+
+        mode_bar = QFrame(); mode_layout = QHBoxLayout(mode_bar)
+        mode_layout.setContentsMargins(0, 0, 0, 6); mode_layout.setSpacing(12)
+        mode_title = QLabel("输入方式"); mode_title.setProperty("sectionTitle", True)
+        mode_layout.addWidget(mode_title)
+        self.input_mode_group = QButtonGroup(self); self.input_mode_group.setExclusive(True)
+        self.dataset_mode_button = QPushButton("数据集样本")
+        self.upload_mode_button = QPushButton("上传数据")
+        self.handwriting_mode_button = QPushButton("MNIST 手写板")
+        for mode_id, button in enumerate((self.dataset_mode_button, self.upload_mode_button,
+                                          self.handwriting_mode_button)):
+            button.setCheckable(True)
+            button.setMinimumHeight(46)
+            button.setStyleSheet(
+                "QPushButton { padding: 8px 22px; border: 1px solid #CBD8E8; "
+                "border-radius: 20px; background: #F6F9FC; color: #405A78; }"
+                "QPushButton:checked { border: 2px solid #1674C8; background: #E4F1FC; "
+                "color: #0969B7; font-weight: 700; }"
+                "QPushButton:disabled { color: #9AA9BA; background: #EEF2F6; }"
+            )
+            self.input_mode_group.addButton(button, mode_id)
+            mode_layout.addWidget(button)
+        self.dataset_mode_button.setChecked(True)
+        mode_layout.addStretch()
+        layout.addWidget(mode_bar)
         left_card = QFrame(); left_card.setProperty("workCard", True)
         left = QVBoxLayout(left_card); left.setContentsMargins(18, 16, 18, 16); left.setSpacing(10)
         left_title = QLabel("推理配置"); left_title.setProperty("sectionTitle", True); left.addWidget(left_title)
@@ -1743,9 +1911,39 @@ class SingleInferenceWidget(QWidget):
         error_row.addWidget(error_button); advanced_form.addRow("器件误差模型文件", error_row)
         self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
         advanced_form.addRow("运行设备", self.device_combo)
-        self.sample_index = QSpinBox(); self.sample_index.setRange(0, 9999)
-        form.addRow("测试样本索引", self.sample_index)
         left.addLayout(form)
+
+        self.input_stack = CurrentPageStackedWidget()
+        dataset_panel = QWidget(); dataset_form = QFormLayout(dataset_panel)
+        dataset_form.setContentsMargins(0, 4, 0, 4)
+        self.sample_index = QSpinBox(); self.sample_index.setRange(0, 9999)
+        dataset_form.addRow("测试样本索引", self.sample_index)
+        self.input_stack.addWidget(dataset_panel)
+
+        upload_panel = QWidget(); upload_form = QFormLayout(upload_panel)
+        upload_form.setContentsMargins(0, 4, 0, 4)
+        self.upload_edit = QLineEdit(); self.upload_edit.setReadOnly(True)
+        upload_row = QHBoxLayout(); upload_row.addWidget(self.upload_edit)
+        self.upload_button = QPushButton("选择图片"); self.upload_button.clicked.connect(self._browse_input_image)
+        upload_row.addWidget(self.upload_button)
+        upload_form.addRow("待推理图片", upload_row)
+        upload_hint = QLabel("支持 PNG、JPG、JPEG、BMP；将按当前模型自动调整尺寸、通道并归一化。")
+        upload_hint.setWordWrap(True); upload_hint.setProperty("sectionHint", True)
+        upload_form.addRow("", upload_hint)
+        self.input_stack.addWidget(upload_panel)
+
+        handwriting_panel = QWidget(); handwriting_layout = QVBoxLayout(handwriting_panel)
+        handwriting_layout.setContentsMargins(0, 4, 0, 4)
+        handwriting_hint = QLabel("在黑色区域内用鼠标书写白色数字。仅支持 MNIST 模型。")
+        handwriting_hint.setWordWrap(True); handwriting_layout.addWidget(handwriting_hint)
+        self.handwriting_canvas = MnistDrawingCanvas(); handwriting_layout.addWidget(
+            self.handwriting_canvas, 0, Qt.AlignmentFlag.AlignHCenter)
+        clear_row = QHBoxLayout(); clear_row.addStretch()
+        clear_button = QPushButton("清空手写板"); clear_button.clicked.connect(self.handwriting_canvas.clear)
+        clear_row.addWidget(clear_button); clear_row.addStretch(); handwriting_layout.addLayout(clear_row)
+        self.input_stack.addWidget(handwriting_panel)
+        self.input_stack.fitCurrentPage()
+        left.addWidget(self.input_stack)
         advanced.content_layout.addLayout(advanced_form); left.addWidget(advanced)
 
         self.resource_status = QLabel()
@@ -1794,21 +1992,23 @@ class SingleInferenceWidget(QWidget):
         right.addLayout(result_area)
         self.left_scroll, self.right_scroll = _add_independent_columns(layout, left_card, right_card)
 
-        requested_model = str(self.settings.value("inference/model", "lenet5-mnist"))
+        requested_model = str(self.settings.value("inference/model", "resnet8-mnist"))
         saved_model = requested_model
-        if not self._model_resources_ready(saved_model):
-            candidates = ["lenet5-mnist"] + [
+        if (saved_model not in FRONTEND_MODEL_ID_SET
+                or not self._model_resources_ready(saved_model)):
+            candidates = ["resnet8-mnist"] + [
                 str(self.model_combo.itemData(i)) for i in range(self.model_combo.count())
             ]
             saved_model = next(
                 (model_id for model_id in candidates if self._model_resources_ready(model_id)),
-                "lenet5-mnist",
+                "resnet8-mnist",
             )
         self.model_combo.setCurrentIndex(max(0, self.model_combo.findData(saved_model)))
         self._load_model_settings(saved_model)
         self._active_model_id = saved_model
         _select_device(self.device_combo, str(self.settings.value("inference/device", "auto")))
         self.model_combo.currentIndexChanged.connect(self._model_changed)
+        self.input_mode_group.idClicked.connect(self._input_mode_changed)
         if self.coordinator is not None:
             _fill_error_model_combo(self.error_model_combo, self.coordinator)
             self.error_model_combo.currentIndexChanged.connect(self._workflow_error_changed)
@@ -1819,6 +2019,7 @@ class SingleInferenceWidget(QWidget):
             self.error_model_combo.addItem("手动选择误差模型文件", None)
             self.error_model_combo.setEnabled(False)
         self._update_resource_status()
+        self._update_input_mode_availability()
         if requested_model != saved_model:
             self.resource_status.setText(
                 f"保存的模型 {requested_model} 缺少资源，已自动切换到 {saved_model}。\n"
@@ -1929,6 +2130,23 @@ class SingleInferenceWidget(QWidget):
         model_id = str(self.model_combo.currentData())
         self._load_model_settings(model_id)
         self._active_model_id = model_id
+        self._update_input_mode_availability()
+        self._update_resource_status()
+
+    def _update_input_mode_availability(self) -> None:
+        is_mnist = str(self.model_combo.currentData()).endswith("mnist")
+        self.handwriting_mode_button.setEnabled(is_mnist)
+        self.handwriting_mode_button.setToolTip(
+            "" if is_mnist else "MNIST 手写板仅适用于使用 MNIST 数据集的模型"
+        )
+        if not is_mnist and self.handwriting_mode_button.isChecked():
+            self.dataset_mode_button.setChecked(True)
+            self._input_mode_changed(0)
+
+    def _input_mode_changed(self, mode_id: int) -> None:
+        self.input_stack.setCurrentIndex(mode_id)
+        labels = ("数据集样本", "上传数据", "MNIST 手写板")
+        self.summary.setText(f"当前输入方式：{labels[mode_id]}，尚未运行")
         self._update_resource_status()
 
     def _refresh_error_models(self) -> None:
@@ -1988,6 +2206,40 @@ class SingleInferenceWidget(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "选择器件误差模型", self.error_model_edit.text(), "JSON (*.json)")
         if path: self.error_model_edit.setText(path)
 
+    def _browse_input_image(self) -> None:
+        start = self.upload_edit.text().strip() or str(self.project_root)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择待推理图片", start,
+            "图片文件 (*.png *.jpg *.jpeg *.bmp);;所有文件 (*)",
+        )
+        if not path:
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            QMessageBox.warning(self, "图片不可用", "无法读取所选图片，请选择有效的 PNG、JPG 或 BMP 文件。")
+            return
+        self.upload_edit.setText(path)
+        self.input_image.setPixmap(pixmap.scaled(
+            220, 220, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+        self.final_prediction.setText("自定义输入，等待推理")
+
+    def _selected_input(self) -> tuple[str | Path | np.ndarray | None, str]:
+        mode_id = self.input_mode_group.checkedId()
+        if mode_id == 0:
+            return None, f"数据集样本 {self.sample_index.value()}"
+        if mode_id == 1:
+            path = Path(self.upload_edit.text().strip()).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError("请先选择一张有效的待推理图片")
+            return path.resolve(), f"上传图片 {path.name}"
+        if not str(self.model_combo.currentData()).endswith("mnist"):
+            raise ValueError("MNIST 手写板仅适用于 MNIST 模型")
+        if not self.handwriting_canvas.has_ink():
+            raise ValueError("请先在手写板中书写一个数字")
+        return self.handwriting_canvas.image_array(), "MNIST 手写板"
+
     def _validate_resources(self) -> tuple[str, Path, Path, Path | None, Path, str]:
         model_id = str(self.model_combo.currentData())
         values = {"root": self.dataset_edit.text().strip(), "checkpoint": self.checkpoint_edit.text().strip(),
@@ -2006,11 +2258,13 @@ class SingleInferenceWidget(QWidget):
             if self.coordinator is not None and self.error_model_combo.currentData():
                 self.coordinator.select_error_model(str(self.error_model_combo.currentData()))
             model_id, dataset, checkpoint, auxiliary, error_model, device = self._validate_resources()
+            input_image, input_description = self._selected_input()
         except Exception as exc:
             message = str(exc); self.summary.setText("推理配置错误：" + message.splitlines()[0])
             self.log.appendPlainText(message); return
         self.last_outcome = None; self.run_button.setEnabled(False); self.progress.setRange(0, 0)
-        self.log.appendPlainText(f"开始推理：{model_id}，样本 {self.sample_index.value()}")
+        self._active_input_description = input_description
+        self.log.appendPlainText(f"开始推理：{model_id}，输入：{input_description}")
         self._save_model_settings(model_id)
         self.settings.setValue("inference/model", model_id); self.settings.setValue("inference/device", device)
         sigma, rho = self.noise_combo.currentData()
@@ -2018,6 +2272,7 @@ class SingleInferenceWidget(QWidget):
             self.service, self.project_root, model_id, self.sample_index.value(),
             dataset, checkpoint, auxiliary, error_model, device,
             self.adc_combo.currentData(), float(sigma), float(rho),
+            input_image,
         )
         self.worker.succeeded.connect(self._inference_succeeded); self.worker.failed.connect(self._inference_failed)
         self.worker.finished.connect(self._inference_finished); self.worker.start()
@@ -2052,14 +2307,18 @@ class SingleInferenceWidget(QWidget):
     def _inference_succeeded(self, outcome: SingleInferenceOutcome) -> None:
         self.last_outcome = outcome
         model_id = str(self.model_combo.currentData())
+        truth = (
+            self._display_name(model_id, outcome.true_label)
+            if outcome.true_label >= 0 else "未知（自定义输入）"
+        )
         self.summary.setText(
-            f"样本索引：{outcome.sample_index}　真实标签：{self._display_name(model_id, outcome.true_label)}　"
+            f"输入：{self._active_input_description}　真实标签：{truth}　"
             f"设备：{outcome.device}　准备：{outcome.preparation_ms:.1f} ms　总耗时：{outcome.total_elapsed_ms:.1f} ms"
         )
         self._show_input_image(outcome)
         final = outcome.predictions[-1]
         self.final_prediction.setText(
-            f"真实标签：{self._display_name(model_id, outcome.true_label)}    "
+            f"真实标签：{truth}    "
             f"器件误差预测：{self._display_name(model_id, final.predicted_label)} "
             f"({final.confidence:.2%})"
         )
@@ -2080,7 +2339,11 @@ class SingleInferenceWidget(QWidget):
         _fit_result_table_height(self.result_table, max_visible_rows=3); _fit_result_table_height(self.top5_table, max_visible_rows=8)
         self.log.appendPlainText("单样本推理完成")
         target = self.project_root / "5_NeuroCIM_opt/outputs/gui_inference"; target.mkdir(parents=True, exist_ok=True)
-        result_path = target / f"{model_id}_sample_{outcome.sample_index}.json"
+        suffix = (
+            f"sample_{outcome.sample_index}" if outcome.true_label >= 0
+            else "custom_" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        )
+        result_path = target / f"{model_id}_{suffix}.json"
         result_path.write_text(json.dumps(outcome.as_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
         self.log.appendPlainText("结果文件：" + str(result_path))
         if self.coordinator is not None and self.error_model_combo.currentData():
@@ -2103,6 +2366,7 @@ class SingleInferenceWidget(QWidget):
     def _inference_finished(self) -> None:
         self.progress.setRange(0, 100); self.progress.setValue(100 if self.last_outcome is not None else 0)
         self._update_resource_status()
+        _retire_widget_worker(self)
 
 
 class BatchInferenceWidget(QWidget):
@@ -2230,7 +2494,7 @@ class BatchInferenceWidget(QWidget):
         right.addWidget(chart_group)
         self.left_scroll, self.right_scroll = _add_independent_columns(layout, left_card, right_card)
         self.model_combo.currentIndexChanged.connect(self._model_changed)
-        self.model_combo.setCurrentIndex(max(0, self.model_combo.findData("lenet5-mnist")))
+        self.model_combo.setCurrentIndex(max(0, self.model_combo.findData("resnet8-mnist")))
         self._model_changed(self.model_combo.currentIndex())
         if self.coordinator is not None:
             _fill_error_model_combo(self.error_model_combo, self.coordinator)
@@ -2268,9 +2532,6 @@ class BatchInferenceWidget(QWidget):
         self.checkpoint_edit.setText(values["checkpoint"]); self.quantization_edit.setText(values["auxiliary"])
         self.auxiliary_label.setText(values["auxiliary_label"])
         self.quantization_edit.setEnabled(bool(values["auxiliary"]))
-        model_id = str(self.model_combo.currentData())
-        if (model_id == "tinytransformer-cifar10" or model_id in VISION_ZOO_MODEL_IDS) and self.batch_size.value() > 4:
-            self.batch_size.setValue(4)
 
     def _refresh_error_models(self) -> None:
         if self.coordinator is None: return
@@ -2401,11 +2662,15 @@ class BatchInferenceWidget(QWidget):
         self.log.appendPlainText(f"结果 JSON：{outcome.output_path}")
         self.log.appendPlainText(f"准确率柱状图：{chart_path}")
         free_bytes = int(outcome.resources.get("cuda_free_bytes_at_start", "0"))
+        ram_available = int(outcome.resources.get("ram_available_bytes_at_start", "0"))
         self.log.appendPlainText(
-            "显存自适应：请求 batch "
+            "资源自适应：请求 batch "
             f"{outcome.resources.get('requested_batch_size', outcome.inference_batch_size)}，"
             f"实际最小 batch {outcome.inference_batch_size}，"
-            f"启动时可用显存 {free_bytes / 1024 ** 3:.2f} GiB"
+            f"实际最大 batch {outcome.resources.get('effective_max_batch_size', outcome.inference_batch_size)}，"
+            f"启动时可用显存 {free_bytes / 1024 ** 3:.2f} GiB，"
+            f"可用 RAM {ram_available / 1024 ** 3:.2f} GiB，"
+            f"OOM 自动重试 {outcome.resources.get('oom_retries', '0')} 次"
         )
         if self.coordinator is not None and self.error_model_combo.currentData():
             auxiliary = self.quantization_edit.text().strip() or None
@@ -2470,6 +2735,7 @@ class BatchInferenceWidget(QWidget):
             bbox_inches="tight", pad_inches=0.05,
             metadata={"Software": "NeuroCIM", "Description": "High-resolution batch inference chart"},
         )
+        figure.clear()
         return chart_path
 
     def _failed(self, details: str) -> None:
@@ -2481,6 +2747,7 @@ class BatchInferenceWidget(QWidget):
     def _finished(self) -> None:
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
         if self.last_outcome is not None: self.progress.setValue(100)
+        _retire_widget_worker(self)
 
 
 class ErrorAwareTrainingWidget(QWidget):
@@ -2508,16 +2775,16 @@ class ErrorAwareTrainingWidget(QWidget):
         description.setProperty("sectionHint", True); description.setWordWrap(True); left.addWidget(description)
         form = QFormLayout(); form.setSpacing(9)
         advanced = CollapsiblePanel(); advanced_form = QFormLayout(); advanced_form.setSpacing(8)
-        self.model_edit = QLineEdit("lenet5-mnist"); self.model_edit.setReadOnly(True)
+        self.model_edit = QLineEdit("resnet8-mnist"); self.model_edit.setReadOnly(True)
         form.addRow("继承的网络模型", self.model_edit)
         self.dataset_name = QLineEdit("MNIST"); self.dataset_name.setReadOnly(True)
         form.addRow("继承的数据集", self.dataset_name)
         self.checkpoint_edit = QLineEdit(str(
-            self.project_root / "3_models/LeNet_5/chekpoint/lenet5_float.pt"
+            self.project_root / "3_models/VisionZoo/checkpoint/resnet8_mnist.pt"
         )); self.checkpoint_edit.setReadOnly(require_workflow)
         advanced_form.addRow("继承的 Checkpoint", self.checkpoint_edit)
         self.auxiliary_edit = QLineEdit(str(
-            self.project_root / "3_models/LeNet_5/chekpoint/quantization.json"
+            self.project_root / "3_models/VisionZoo/checkpoint/resnet8-mnist_input_scales.json"
         )); self.auxiliary_edit.setReadOnly(require_workflow)
         advanced_form.addRow("继承的辅助参数", self.auxiliary_edit)
         self.error_model_combo = QComboBox(); form.addRow("误差建模方法", self.error_model_combo)
@@ -2678,6 +2945,10 @@ class ErrorAwareTrainingWidget(QWidget):
             self.summary.setText("等待推理配置：请先成功完成单样本或批量带误差推理。" + str(exc))
             if self.require_workflow: self.run_button.setEnabled(False)
             return
+        if str(values["network_model"]) not in FRONTEND_MODEL_ID_SET:
+            self.summary.setText("历史推理使用的模型已从当前前端清单移除，请先选择可见模型并重新推理。")
+            self.run_button.setEnabled(False)
+            return
         self.model_edit.setText(str(values["network_model"]))
         if str(values["network_model"]) == "gpt2-large":
             self.dataset_name.setText(str(values["dataset_name"]))
@@ -2685,8 +2956,7 @@ class ErrorAwareTrainingWidget(QWidget):
             self.checkpoint_edit.setText(str(values["checkpoint_path"]))
             self.auxiliary_edit.setText(str(values["auxiliary_path"] or ""))
             self.summary.setText(
-                "已继承 GPT-2 Large 配置。当前版本只开放 GPT-2 Small 误差感知微调；"
-                "Large 在 12 GB 显卡上不启动训练。"
+                "已继承 GPT-2-large 配置。当前版本暂未开放该模型的误差感知训练。"
             )
             self.run_button.setEnabled(False)
             return
@@ -2716,10 +2986,6 @@ class ErrorAwareTrainingWidget(QWidget):
             self.run_button.setEnabled(bool(self.error_model_combo.currentData()))
             return
         inherited_model = str(values["network_model"])
-        if inherited_model == "tinytransformer-cifar10" and self.batch_spin.value() > 128:
-            self.batch_spin.setValue(128)
-        elif inherited_model in VISION_ZOO_MODEL_IDS and self.batch_spin.value() > 4:
-            self.batch_spin.setValue(4)
         self.dataset_name.setText(str(values["dataset_name"]))
         self.dataset_edit.setText(str(values["dataset_root"]))
         self.checkpoint_edit.setText(str(values["checkpoint_path"]))
@@ -2911,6 +3177,7 @@ class ErrorAwareTrainingWidget(QWidget):
         axes.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=2,
                     frameon=False, prop=chinese_font, fontsize=10)
         figure.savefig(chart_path, dpi=300, facecolor="white", bbox_inches="tight")
+        figure.clear()
         return chart_path
 
     def _training_failed(self, details: str) -> None:
@@ -2932,6 +3199,7 @@ class ErrorAwareTrainingWidget(QWidget):
         else:
             self.run_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        _retire_widget_worker(self)
 
     def export_result(self) -> None:
         if self.last_outcome is None:
@@ -3120,6 +3388,7 @@ class PpaEvaluationWidget(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(100 if self.last_outcome is not None else 0)
         self.run_button.setEnabled(True)
+        _retire_widget_worker(self)
 
 
 class GPT2GenerationWidget(QWidget):
@@ -3135,19 +3404,19 @@ class GPT2GenerationWidget(QWidget):
         self.worker: GPT2GenerationThread | None = None
         self.last_outcome: GPT2GenerationOutcome | None = None
         model_root = self.project_root / "3_models/GPT2/checkpoint"
-        self.model_variant = "gpt2-small"
-        self.dataset_name = "prompt_text"
-        self.dataset_root = model_root / "tokenizer"
+        self.model_variant = "gpt2-large"
+        self.dataset_name = "wikitext2"
+        self.dataset_root = model_root / "gpt2-large/wikitext-2-raw-v1"
         platform_root = self.project_root / "5_NeuroCIM_opt"
 
         layout = QVBoxLayout(self)
         description = QLabel(
-            "输入文本提示词，对比 GPT-2 Small 的浮点、理想差分和所选器件误差差分生成结果。"
+            "输入文本提示词，对比 GPT-2-large 的浮点、理想差分和所选器件误差差分生成结果。"
             "差分计算映射到最后一个 Transformer Block 的注意力输出投影与 MLP 输出投影。"
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
-        self.model_label = QLabel("GPT-2 Small")
+        self.model_label = QLabel("GPT-2-large / WikiText-2")
         form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(model_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         form.addRow("GPT-2 Checkpoint", self.checkpoint_edit)
@@ -3213,7 +3482,8 @@ class GPT2GenerationWidget(QWidget):
         checkpoint_root = self.project_root / "3_models/GPT2/checkpoint"
         if spec.model_id == "gpt2-large":
             resource_root = checkpoint_root / "gpt2-large"
-            self.checkpoint_edit.setText(str(resource_root / "model.safetensors"))
+            runtime = resource_root / "model.fp16.safetensors"
+            self.checkpoint_edit.setText(str(runtime if runtime.is_file() else resource_root / "model.safetensors"))
             self.tokenizer_edit.setText(str(resource_root))
             self.scales_edit.setText(str(resource_root / "input_scales.json"))
             self.dataset_root = resource_root / "wikitext-2-raw-v1"
@@ -3332,6 +3602,7 @@ class GPT2GenerationWidget(QWidget):
 
     def _finished(self) -> None:
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
+        _retire_widget_worker(self)
 
 
 class GPT2BatchInferenceWidget(QWidget):
@@ -3346,7 +3617,7 @@ class GPT2BatchInferenceWidget(QWidget):
         self.service = GPT2GenerationService()
         self.worker: GPT2BatchThread | None = None
         checkpoint_root = self.project_root / "3_models/GPT2/checkpoint"
-        self.model_variant = "gpt2-small"
+        self.model_variant = "gpt2-large"
         self.dataset_name = "prompt_text"
         self.dataset_root = checkpoint_root / "tokenizer"
         platform_root = self.project_root / "5_NeuroCIM_opt"
@@ -3356,7 +3627,7 @@ class GPT2BatchInferenceWidget(QWidget):
         )
         description.setWordWrap(True); layout.addWidget(description)
         form = QFormLayout()
-        self.model_label = QLabel("GPT-2 Small")
+        self.model_label = QLabel("GPT-2-large / WikiText-2")
         form.addRow("继承的模型与数据集", self.model_label)
         self.checkpoint_edit = QLineEdit(str(checkpoint_root / "gpt2_nanogpt.pt")); self.checkpoint_edit.setReadOnly(True)
         self.tokenizer_edit = QLineEdit(str(checkpoint_root / "tokenizer")); self.tokenizer_edit.setReadOnly(True)
@@ -3437,7 +3708,8 @@ class GPT2BatchInferenceWidget(QWidget):
         checkpoint_root = self.project_root / "3_models/GPT2/checkpoint"
         if spec.model_id == "gpt2-large":
             resource_root = checkpoint_root / "gpt2-large"
-            self.checkpoint_edit.setText(str(resource_root / "model.safetensors"))
+            runtime = resource_root / "model.fp16.safetensors"
+            self.checkpoint_edit.setText(str(runtime if runtime.is_file() else resource_root / "model.safetensors"))
             self.tokenizer_edit.setText(str(resource_root))
             self.scales_edit.setText(str(resource_root / "input_scales.json"))
             self.dataset_root = resource_root / "wikitext-2-raw-v1"
@@ -3535,6 +3807,7 @@ class GPT2BatchInferenceWidget(QWidget):
     def _finished(self) -> None:
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
         if self.result_table.rowCount(): self.progress.setValue(100)
+        _retire_widget_worker(self)
 
 
 class WikiText2EvaluationWidget(QWidget):
@@ -3566,7 +3839,8 @@ class WikiText2EvaluationWidget(QWidget):
         form = QFormLayout()
         self.model_label = QLabel("GPT-2 Large")
         form.addRow("继承的模型", self.model_label)
-        self.checkpoint_edit = QLineEdit(str(resource_root / "model.safetensors"))
+        runtime = resource_root / "model.fp16.safetensors"
+        self.checkpoint_edit = QLineEdit(str(runtime if runtime.is_file() else resource_root / "model.safetensors"))
         self.checkpoint_edit.setReadOnly(True); form.addRow("Checkpoint", self.checkpoint_edit)
         self.tokenizer_edit = QLineEdit(str(resource_root))
         self.tokenizer_edit.setReadOnly(True); form.addRow("分词器", self.tokenizer_edit)
@@ -3693,6 +3967,7 @@ class WikiText2EvaluationWidget(QWidget):
         self.run_button.setEnabled(True); self.cancel_button.setEnabled(False)
         if self.last_outcome is not None:
             self.progress.setValue(100)
+        _retire_widget_worker(self)
 
 
 class UnifiedSingleInferenceWidget(QWidget):
@@ -3852,6 +4127,7 @@ class MainWindow(QMainWindow):
         help_menu.addAction(version_action)
         self.menuBar().hide()
         self._apply_visual_roles()
+        self._configure_long_running_safety()
         self.workflow.models_changed.connect(self._refresh_home_summary)
         self.workflow.selection_changed.connect(lambda _value: self._refresh_home_summary())
         self.workflow.network_changed.connect(lambda _value: self._refresh_home_summary())
@@ -3869,7 +4145,59 @@ class MainWindow(QMainWindow):
             widget.device_mode_button.setChecked(device_selected)
             widget.array_mode_button.setChecked(not device_selected)
 
-    def _clear_runtime_caches(self) -> None:
+    def _configure_long_running_safety(self) -> None:
+        """Bound GUI-owned memory and recover idle caches under pressure."""
+
+        # QPixmapCache uses KiB. High-resolution charts otherwise accumulate
+        # in the global Qt cache even after labels show a newer image.
+        QPixmapCache.setCacheLimit(48 * 1024)
+        for editor in self.findChildren(QPlainTextEdit):
+            if editor.isReadOnly():
+                editor.document().setMaximumBlockCount(1500)
+        self._last_automatic_cache_cleanup = 0.0
+        self._memory_watchdog = QTimer(self)
+        self._memory_watchdog.setInterval(15_000)
+        self._memory_watchdog.timeout.connect(self._memory_watchdog_tick)
+        self._memory_watchdog.start()
+
+    def _has_running_background_job(self) -> bool:
+        for widget in self.findChildren(QWidget):
+            worker = getattr(widget, "worker", None)
+            if isinstance(worker, QThread) and worker.isRunning():
+                return True
+        for name in ("update_check_thread", "update_download_thread"):
+            worker = getattr(self, name, None)
+            if isinstance(worker, QThread) and worker.isRunning():
+                return True
+        return False
+
+    def _memory_watchdog_tick(self) -> None:
+        if self._has_running_background_job():
+            return
+        try:
+            import torch
+            from .runtime_memory import runtime_memory_snapshot
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            snapshot = runtime_memory_snapshot(device)
+            ram_total = snapshot["ram_total_bytes"]
+            ram_pressure = bool(
+                ram_total and snapshot["ram_available_bytes"] / ram_total < 0.12
+            )
+            gpu_total = snapshot["total_bytes"]
+            gpu_pressure = bool(
+                gpu_total and snapshot["free_bytes"] / gpu_total < 0.08
+            )
+            now = monotonic()
+            if ((ram_pressure or gpu_pressure)
+                    and now - self._last_automatic_cache_cleanup >= 60.0):
+                self._last_automatic_cache_cleanup = now
+                self._clear_runtime_caches(interactive=False)
+        except Exception:
+            # A health monitor must never destabilize the GUI it protects.
+            return
+
+    def _clear_runtime_caches(self, _checked: bool = False, *, interactive: bool = True) -> None:
         import gc
 
         from .inference_runtime import clear_lenet_inference_cache
@@ -3890,7 +4218,8 @@ class MainWindow(QMainWindow):
             detail += "，CUDA 未使用缓存已释放"
         detail += "；运行结果文件未删除。"
         self.statusBar().showMessage(detail, 8000)
-        QMessageBox.information(self, "清空缓存", detail)
+        if interactive:
+            QMessageBox.information(self, "清空缓存", detail)
 
     def _build_navigation_shell(self) -> QWidget:
         root = QWidget()
@@ -4081,7 +4410,7 @@ class MainWindow(QMainWindow):
             except Exception: error_name = selected
         else: error_name = "尚未完成误差建模"
         self.home_experiment.setText(f"{error_name}  ×  {network}"); self.home_hint.setText("此配置会自动传递到单样本推理、批量推理与误差感知训练。")
-        self.sidebar_summary.setText(f"{len(self.workflow.model_registry.list())} 个网络配置\n{len(self.workflow.models())} 个可选误差模型")
+        self.sidebar_summary.setText(f"{len(_frontend_model_specs(self.workflow.model_registry))} 个网络配置\n{len(self.workflow.models())} 个可选误差模型")
 
     def _open_run_records(self) -> None:
         from PySide6.QtCore import QUrl
@@ -4249,7 +4578,7 @@ class ModelCatalogWidget(QWidget):
                  coordinator: WorkflowCoordinator | None = None):
         super().__init__(parent)
         self.coordinator = coordinator
-        self.specs = builtin_registry(project_root).list()
+        self.specs = _frontend_model_specs(builtin_registry(project_root))
         layout = QVBoxLayout(self)
         explanation = QLabel(
             "在这里勾选一个模型与数据集组合。单样本推理、批量推理和后续训练将统一继承该选择；"
@@ -4258,7 +4587,7 @@ class ModelCatalogWidget(QWidget):
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         self.table = QTableWidget()
-        columns = ["使用", "模型 ID", "名称", "任务", "数据集", "输入", "指标", "Checkpoint"]
+        columns = ["使用", "模型", "任务", "数据集", "报告基线", "本机复验", "网络类别", "资源状态"]
         self.table.setColumnCount(len(columns))
         self.table.setHorizontalHeaderLabels(columns)
         self.table.setRowCount(len(self.specs))
@@ -4275,8 +4604,12 @@ class ModelCatalogWidget(QWidget):
             selector.clicked.connect(lambda checked, model_id=spec.model_id:
                                      self._select_model(model_id) if checked else None)
             values = [
-                spec.model_id, spec.display_name, _task_display_name(spec.task), ", ".join(spec.datasets),
-                "×".join(map(str, spec.input_shape)), ", ".join(spec.metrics),
+                spec.display_name,
+                spec.report_task or _task_display_name(spec.task),
+                spec.report_dataset or ", ".join(spec.datasets),
+                spec.report_baseline or "-",
+                spec.verified_baseline or "待复验",
+                spec.model_family or "-",
                 "可用" if spec.resources_available else "未安装",
             ]
             for column, value in enumerate(values):
@@ -4318,9 +4651,11 @@ class ModelCatalogWidget(QWidget):
                 widget.setChecked(spec.model_id == model_id)
                 widget.blockSignals(False)
         spec = next(item for item in self.specs if item.model_id == model_id)
-        dataset = ", ".join(spec.datasets)
+        dataset = spec.report_dataset or ", ".join(spec.datasets)
         self.selection_status.setText(
-            f"当前统一配置：{spec.display_name}　|　数据集：{dataset}　|　任务：{_task_display_name(spec.task)}"
+            f"当前统一配置：{spec.display_name}　|　数据集：{dataset}　|　"
+            f"任务：{spec.report_task or _task_display_name(spec.task)}　|　"
+            f"报告基线：{spec.report_baseline or '-'}"
         )
 
 

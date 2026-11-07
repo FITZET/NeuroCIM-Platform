@@ -14,8 +14,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT.parent
 OUT = ROOT / "outputs" / "visualization_examples"
-TRAINING = ROOT / "outputs" / "aos1_workflow" / "training_result.json"
-MODEL = ROOT / "outputs" / "demo" / "aos1_gui" / "fit_result" / "error_model"
+TRAINING = ROOT / "outputs" / "uos1_workflow" / "training_result.json"
+MODEL = ROOT / "outputs" / "demo" / "uos1_gui" / "fit_result" / "error_model"
 PPA = ROOT / "outputs" / "neurosim" / "01_NMOS" / "neurosim_result.json"
 
 COLORS = {
@@ -74,11 +74,11 @@ def main() -> None:
       <div class="metric accent"><b>+{(after['device_differential']['accuracy']-before['device_differential']['accuracy'])*100:.2f} pp</b><span>误差感知训练收益</span></div>
     </div>
     <div class="flow">
-      <div>AOS1<br><small>65,536 点</small></div><i>→</i><div>误差拟合<br><small>256×256 LUT</small></div><i>→</i>
+      <div>UOS1<br><small>65,536 点</small></div><i>→</i><div>误差拟合<br><small>256×256 LUT</small></div><i>→</i>
       <div>差分推理<br><small>10,000 样本</small></div><i>→</i><div>EAT<br><small>55,000 样本</small></div><i>→</i>
       <div>训练后评估<br><small>99.00%</small></div>
     </div>"""
-    sections.append(card("overview", "01", "全流程结果总览", "AOS1 真实数据",
+    sections.append(card("overview", "01", "全流程结果总览", "UOS1 真实数据",
                          "首页用指标卡和流程状态展示一次实验从器件数据到训练后评估的完整链路。",
                          overview, "用户进入软件后无需切换页面，就能判断实验是否完成以及精度是否得到恢复。"))
 
@@ -93,7 +93,7 @@ def main() -> None:
         fig.add_trace(go.Scatter(x=codes, y=ideal[w], name=f"W={w} 理想", line=dict(color=color, dash="dot"), showlegend=False), 1, 3)
     fig.update_xaxes(title_text="输入编码 X"); fig.update_yaxes(title_text="权重编码 W", row=1, col=1)
     fig.update_yaxes(title_text="权重编码 W", row=1, col=2); fig.update_yaxes(title_text="乘法输出", row=1, col=3)
-    figures.append(style(fig, "AOS1 器件乘法特性与误差区域", 480))
+    figures.append(style(fig, "UOS1 器件乘法特性与误差区域", 480))
 
     # 3. Four-branch decomposition with actual LUT values.
     xp, xn, wp, wn = 180, 42, 130, 25
@@ -107,7 +107,7 @@ def main() -> None:
     figures.append(style(fig, "一次有符号 MAC 的四路差分分解", 420))
 
     # 4. Accuracy and confusion comparison.
-    modes = ["浮点", "理想差分", "AOS1 器件差分"]
+    modes = ["浮点", "理想差分", "UOS1 器件差分"]
     keys = ["float", "ideal_differential", "device_differential"]
     fig = make_subplots(rows=1, cols=3, specs=[[{"type": "bar"}, {"type": "heatmap"}, {"type": "heatmap"}]],
                         subplot_titles=("训练前后准确率", "训练前器件混淆矩阵", "训练后器件混淆矩阵"))
@@ -141,7 +141,7 @@ def main() -> None:
 
     # 7. Actual weight deltas.
     base_ckpt = PROJECT / "3_models" / "LeNet_5" / "chekpoint" / "lenet5_float.pt"
-    trained_ckpt = ROOT / "outputs" / "aos1_workflow" / "eat_checkpoint.pt"
+    trained_ckpt = ROOT / "outputs" / "uos1_workflow" / "eat_checkpoint.pt"
     base_payload = torch.load(base_ckpt, map_location="cpu", weights_only=True)
     train_payload = torch.load(trained_ckpt, map_location="cpu", weights_only=True)
     base_state = base_payload.get("best_model_state_dict", base_payload.get("model_state_dict", base_payload))
@@ -174,7 +174,7 @@ def main() -> None:
 
     # 9. Multi-device comparison: fit quality from available bundles.
     devices, r2s, nls = [], [], []
-    for name in ("01_NMOS", "02_CFET", "03_AOS_1", "04_AOS_2"):
+    for name in ("01_NMOS", "02_CFET", "03_UOS_1", "04_UOS_2"):
         path = ROOT / "outputs" / "error_models" / name / "error_model.json"
         if path.is_file():
             d = json.loads(path.read_text(encoding="utf-8"))["metadata"]["fitting_summary"]["interaction_metrics"]
@@ -199,10 +199,10 @@ def main() -> None:
     # 11. Experiment history is an HTML-native table.
     history = f"""
     <div class="table-wrap"><table><thead><tr><th>实验</th><th>器件</th><th>网络</th><th>λ</th><th>训练前</th><th>训练后</th><th>状态</th></tr></thead>
-    <tbody><tr><td>AOS1 正式流程</td><td>03_AOS_1</td><td>LeNet-5 / MNIST</td><td>1.0</td>
+    <tbody><tr><td>UOS1 正式流程</td><td>03_UOS_1</td><td>LeNet-5 / MNIST</td><td>1.0</td>
     <td>{before['device_differential']['accuracy']:.2%}</td><td>{after['device_differential']['accuracy']:.2%}</td><td><span class="ok">已完成</span></td></tr>
-    <tr class="dim"><td>参数扫描示例</td><td>03_AOS_1</td><td>LeNet-5 / MNIST</td><td>0 → 1</td><td>—</td><td>—</td><td>待运行</td></tr>
-    <tr class="dim"><td>PPA 联合评估示例</td><td>03_AOS_1</td><td>LeNet-5 / MNIST</td><td>1.0</td><td>—</td><td>—</td><td>待运行</td></tr></tbody></table></div>
+    <tr class="dim"><td>参数扫描示例</td><td>03_UOS_1</td><td>LeNet-5 / MNIST</td><td>0 → 1</td><td>—</td><td>—</td><td>待运行</td></tr>
+    <tr class="dim"><td>PPA 联合评估示例</td><td>03_UOS_1</td><td>LeNet-5 / MNIST</td><td>1.0</td><td>—</td><td>—</td><td>待运行</td></tr></tbody></table></div>
     <div class="report-actions"><button>导出实验 JSON</button><button>生成 PDF 报告</button><button>导出全部图表</button></div>"""
 
     # Convert figures in their section order.
@@ -211,28 +211,28 @@ def main() -> None:
         divs.append(fig.to_html(full_html=False, include_plotlyjs="inline" if index == 0 else False,
                                 config={"displaylogo": False, "responsive": True, "toImageButtonOptions": {"format": "png", "scale": 2}}))
     titles = [
-        ("device", "02", "器件误差可视化", "AOS1 真实数据", "通过 LUT、残差热力图和切片曲线定位误差集中的编码区域。",
+        ("device", "02", "器件误差可视化", "UOS1 真实数据", "通过 LUT、残差热力图和切片曲线定位误差集中的编码区域。",
          "热力图支持缩放和悬停查看具体编码值；切片用于比较器件曲线与理想乘法。"),
-        ("differential", "03", "正负权重差分计算", "AOS1 真实 LUT 示例", "把一次有符号计算拆成四个非负器件分支，并显示每条路径对最终结果的贡献。",
+        ("differential", "03", "正负权重差分计算", "UOS1 真实 LUT 示例", "把一次有符号计算拆成四个非负器件分支，并显示每条路径对最终结果的贡献。",
          "瀑布图适合排查某一路误差被相加还是相减，以及差分抵消是否有效。"),
-        ("inference", "04", "推理结果对比", "AOS1 真实数据", "同时比较浮点、理想差分和器件差分，并用混淆矩阵定位受影响的数字类别。",
+        ("inference", "04", "推理结果对比", "UOS1 真实数据", "同时比较浮点、理想差分和器件差分，并用混淆矩阵定位受影响的数字类别。",
          "当前图表使用完整 10,000 个 MNIST 测试样本。"),
         ("layers", "05", "逐层误差传播", "界面原型", "用层输出 RMSE 和余弦相似度确定误差从哪一层开始明显放大。",
          "该布局为实现范例；正式版本需要增加逐层激活采集后才能生成真实数值。"),
-        ("training", "06", "误差感知训练", "AOS1 真实数据", "显示训练/验证质量，以及误差感知训练为器件差分路径恢复了多少准确率。",
+        ("training", "06", "误差感知训练", "UOS1 真实数据", "显示训练/验证质量，以及误差感知训练为器件差分路径恢复了多少准确率。",
          "后续多 epoch 运行时可直接扩展为实时损失和准确率折线。"),
-        ("weights", "07", "权重变化可视化", "AOS1 真实数据", "比较各层权重的 L2 更新量与最大单点更新，解释网络在哪里适应器件误差。",
-         "数据来自原始 LeNet-5 checkpoint 与 AOS1 EAT checkpoint 的逐层差值。"),
+        ("weights", "07", "权重变化可视化", "UOS1 真实数据", "比较各层权重的 L2 更新量与最大单点更新，解释网络在哪里适应器件误差。",
+         "数据来自原始 LeNet-5 checkpoint 与 UOS1 EAT checkpoint 的逐层差值。"),
         ("lambda", "08", "误差强度扫描", "端点真实 / 中间原型", "观察 λ 从 0 到 1 时的精度退化，以及训练后鲁棒性曲线是否更平缓。",
          "菱形端点为真实评估；中间曲线仅示范界面，正式实现应自动执行每个 λ。"),
-        ("devices", "09", "多器件横向对比", "真实拟合指标", "在统一坐标下比较 NMOS、CFET、AOS1 与 AOS2 的拟合质量和非线性。",
+        ("devices", "09", "多器件横向对比", "真实拟合指标", "在统一坐标下比较 NMOS、CFET、UOS1 与 UOS2 的拟合质量和非线性。",
          "可继续加入统一网络上的准确率和训练恢复量，形成器件选择依据。"),
         ("ppa", "10", "NeuroSim 硬件结果", "官方 NeuroSim 参考数据", "显示每层延迟和动态能耗，并为子阵列扫描与精度/PPA Pareto 图提供入口。",
-         "当前图使用已完成的 01_NMOS LeNet-5 官方 NeuroSim 结果；AOS1 PPA 尚未执行。"),
+         "当前图使用已完成的 01_NMOS LeNet-5 官方 NeuroSim 结果；UOS1 PPA 尚未执行。"),
     ]
     for args, div in zip(titles, divs):
         sections.append(card(*args[:5], div, args[5]))
-    sections.append(card("history", "11", "实验管理与报告", "AOS1 真实记录",
+    sections.append(card("history", "11", "实验管理与报告", "UOS1 真实记录",
                          "集中查看实验状态、输入配置、训练前后结果和导出入口。", history,
                          "正式实现时每行可打开对应实验总览，并支持任意两次运行对比。"))
 

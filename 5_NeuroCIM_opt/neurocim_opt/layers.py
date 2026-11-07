@@ -26,6 +26,22 @@ def _quantize_magnitude(value: Tensor, scale: Tensor) -> Tensor:
     return torch.clamp(torch.round(normalized), 0, 255).to(torch.int64)
 
 
+def _quantize_signed_code(value: Tensor, scale: Tensor) -> Tensor:
+    """Return the exact signed magnitude code used by the LUT implementation."""
+
+    magnitude = _quantize_magnitude(value, scale)
+    safe = torch.nan_to_num(value, nan=0.0, posinf=1.0, neginf=-1.0)
+    return (magnitude * torch.sign(safe).to(torch.int64)).to(torch.int16)
+
+
+def _signed_lut_product_codes(lut: Tensor, qx: Tensor, qw: Tensor) -> Tensor:
+    """Look up already-quantized signed codes without changing LUT semantics."""
+
+    magnitude = lut[qw.abs().to(torch.int64), qx.abs().to(torch.int64)]
+    return (magnitude * torch.sign(qx).to(magnitude.dtype)
+            * torch.sign(qw).to(magnitude.dtype))
+
+
 def _signed_lut_product(lut: Tensor, x: Tensor, w: Tensor, x_scale: Tensor, w_scale: Tensor) -> Tensor:
     """Exact signed product from an interaction LUT whose axes are already zeroed."""
 
@@ -36,6 +52,61 @@ def _signed_lut_product(lut: Tensor, x: Tensor, w: Tensor, x_scale: Tensor, w_sc
     safe_w = torch.nan_to_num(w, nan=0.0, posinf=1.0, neginf=-1.0)
     sign = torch.sign(safe_x).to(torch.int64) * torch.sign(safe_w).to(torch.int64)
     return magnitude * sign
+
+
+def _split_signed_code(code: Tensor) -> tuple[Tensor, Tensor]:
+    """Split [-255, 255] exactly into low + 128 * high INT8 terms."""
+
+    value = code.to(torch.int16)
+    high = torch.sign(value) * (value.abs() // 128)
+    low = value - high * 128
+    return low.to(torch.int8), high.to(torch.int8)
+
+
+def _int8_mm(left: Tensor, right: Tensor) -> Tensor:
+    """Exact INT8 GEMM with padding for CUDA's alignment constraints."""
+
+    rows, shared = left.shape
+    if right.ndim != 2 or right.shape[0] != shared:
+        raise ValueError("INT8 matrix dimensions do not match")
+    columns = right.shape[1]
+    if left.device.type != "cuda":
+        return torch._int_mm(left.contiguous(), right.contiguous())
+
+    # torch._int_mm uses the CUDA INT8 tensor-core path, which requires aligned
+    # K/N dimensions and more than 16 rows. Zero padding is mathematically inert.
+    padded_rows = max(24, ((rows + 7) // 8) * 8)
+    padded_shared = ((shared + 7) // 8) * 8
+    padded_columns = ((columns + 7) // 8) * 8
+    if (padded_rows, padded_shared) != (rows, shared):
+        left = F.pad(left, (0, padded_shared - shared, 0, padded_rows - rows))
+    if (padded_shared, padded_columns) != (shared, columns):
+        right = F.pad(right, (0, padded_columns - columns, 0, padded_shared - shared))
+    return torch._int_mm(left.contiguous(), right.contiguous())[:rows, :columns]
+
+
+def _ideal_signed_code_mm(left_codes: Tensor, right_codes: Tensor) -> Tensor:
+    """Compute signed-code matrix multiplication with exact integer arithmetic.
+
+    ``left_codes`` is [M, K], ``right_codes`` is [N, K]. Four INT8 GEMMs
+    reconstruct the full signed 9-bit product without approximation.
+    """
+
+    if left_codes.shape[1] != right_codes.shape[1]:
+        raise ValueError("signed-code matrix dimensions do not match")
+    # The final result is bounded by K * 255^2. Keep an explicit guard even
+    # though all currently supported layers are far below the INT32 limit.
+    if left_codes.shape[1] * 255 * 255 > torch.iinfo(torch.int32).max:
+        return left_codes.to(torch.int64) @ right_codes.to(torch.int64).transpose(0, 1)
+    left_low, left_high = _split_signed_code(left_codes)
+    right_low, right_high = _split_signed_code(right_codes)
+    right_low_t = right_low.transpose(0, 1).contiguous()
+    right_high_t = right_high.transpose(0, 1).contiguous()
+    low_low = _int8_mm(left_low, right_low_t).to(torch.int64)
+    low_high = _int8_mm(left_low, right_high_t).to(torch.int64)
+    high_low = _int8_mm(left_high, right_low_t).to(torch.int64)
+    high_high = _int8_mm(left_high, right_high_t).to(torch.int64)
+    return low_low + 128 * (low_high + high_low) + 16384 * high_high
 
 
 def _ste(exact: Tensor, surrogate: Tensor) -> Tensor:
@@ -73,7 +144,14 @@ class DifferentialLayerMixin:
             raise ValueError("input_scale must be positive")
         if mac_chunk_size <= 0:
             raise ValueError("mac_chunk_size must be positive")
+        if (int(table.min()) >= torch.iinfo(torch.int32).min
+                and int(table.max()) <= torch.iinfo(torch.int32).max):
+            table = table.to(torch.int32)
         self.register_buffer("hardware_lut", table, persistent=False)
+        ideal_codes = torch.arange(256, dtype=torch.int64, device=table.device)
+        self._ideal_product_lut = bool(torch.equal(
+            table.to(torch.int64), ideal_codes[:, None] * ideal_codes[None, :]
+        ))
         self.register_buffer(
             "input_scale", torch.tensor(float(input_scale), dtype=torch.float64), persistent=False
         )
@@ -88,6 +166,24 @@ class DifferentialLayerMixin:
         self.noise_sigma = 0.0
         self.noise_rho = 0.0
         self.noise_seed = 0
+        self.register_buffer(
+            "_cached_signed_weight_codes", torch.empty(0, dtype=torch.int16, device=self.weight.device),
+            persistent=False,
+        )
+        self._cached_weight_version = -1
+
+    def _signed_weight_codes(self) -> Tensor:
+        """Cache inference weights, refreshing automatically after optimizer updates."""
+
+        version = int(self.weight._version)
+        if (self._cached_weight_version != version
+                or self._cached_signed_weight_codes.shape != self.weight.shape):
+            scale_shape = [self.weight.shape[0]] + [1] * (self.weight.ndim - 1)
+            self._cached_signed_weight_codes = _quantize_signed_code(
+                self.weight.detach(), self.weight_scale.view(*scale_shape)
+            )
+            self._cached_weight_version = version
+        return self._cached_signed_weight_codes
 
     def configure_nonidealities(
         self, *, adc_bits: int | None = None, noise_sigma: float = 0.0,
@@ -185,23 +281,25 @@ class DifferentialLinear(DifferentialLayerMixin, nn.Linear):
 
     def forward(self, input: Tensor) -> Tensor:
         flat = input.reshape(-1, self.in_features)
-        accumulator = torch.zeros(
-            (flat.shape[0], self.out_features), dtype=torch.int64, device=input.device
-        )
-        lut = self.hardware_lut.to(input.device)
-        x_scale = self.input_scale.to(input.device).view(1, 1, 1)
-        w_scale = self.weight_scale.to(input.device).view(1, -1, 1)
-        for start in range(0, self.in_features, self.mac_chunk_size):
-            stop = min(start + self.mac_chunk_size, self.in_features)
-            accumulator.add_(
-                _signed_lut_product(
-                    lut,
-                    flat[:, None, start:stop],
-                    self.weight[None, :, start:stop],
-                    x_scale,
-                    w_scale,
-                ).sum(dim=-1)
+        qx_all = _quantize_signed_code(flat, self.input_scale.to(input.device))
+        qw_all = self._signed_weight_codes().reshape(self.out_features, self.in_features)
+        if self._ideal_product_lut:
+            accumulator = _ideal_signed_code_mm(qx_all, qw_all)
+        else:
+            accumulator = torch.zeros(
+                (flat.shape[0], self.out_features), dtype=torch.int64, device=input.device
             )
+        lut = self.hardware_lut.to(input.device)
+        if not self._ideal_product_lut:
+            for start in range(0, self.in_features, self.mac_chunk_size):
+                stop = min(start + self.mac_chunk_size, self.in_features)
+                accumulator.add_(
+                    _signed_lut_product_codes(
+                        lut,
+                        qx_all[:, None, start:stop],
+                        qw_all[None, :, start:stop],
+                    ).sum(dim=-1, dtype=torch.int64)
+                )
         # int64 MAC totals can exceed the finite FP16 range before the small
         # quantization scales are applied.  Scale in FP32, then cast back, so
         # GPT-2-large FP16 inference does not create inf/NaN LUT indices in the
@@ -302,25 +400,31 @@ class DifferentialConv2d(DifferentialLayerMixin, nn.Conv2d):
             (batch, self.out_channels, locations), dtype=torch.int64, device=input.device
         )
         lut = self.hardware_lut.to(input.device)
-        x_scale = self.input_scale.to(input.device).view(1, 1, 1, 1)
         w_scale_all = self.weight_scale.to(input.device)
-        weights = self.weight.reshape(self.out_channels, kernel_elements)
+        qpatches = _quantize_signed_code(
+            patches, self.input_scale.to(input.device)
+        )
+        qweights = self._signed_weight_codes().reshape(self.out_channels, kernel_elements)
         for group in range(self.groups):
             out_start = group * out_per_group
             out_stop = out_start + out_per_group
             patch_start = group * in_group_elements
             patch_stop = patch_start + in_group_elements
-            x_group = patches[:, patch_start:patch_stop, :]
-            w_group = weights[out_start:out_stop]
+            x_group = qpatches[:, patch_start:patch_stop, :]
+            w_group = qweights[out_start:out_stop]
             group_acc = accumulator[:, out_start:out_stop]
-            group_scales = w_scale_all[out_start:out_stop].view(1, -1, 1, 1)
-            for start in range(0, kernel_elements, self.mac_chunk_size):
-                stop = min(start + self.mac_chunk_size, kernel_elements)
-                x = x_group[:, start:stop, :].permute(0, 2, 1).unsqueeze(1)
-                w = w_group[:, start:stop].view(1, out_per_group, 1, stop - start)
-                group_acc.add_(
-                    _signed_lut_product(lut, x, w, x_scale, group_scales).sum(dim=-1)
-                )
+            if self._ideal_product_lut:
+                rows = x_group.permute(0, 2, 1).reshape(batch * locations, kernel_elements)
+                exact_group = _ideal_signed_code_mm(rows, w_group)
+                group_acc.copy_(exact_group.reshape(batch, locations, out_per_group).permute(0, 2, 1))
+            else:
+                for start in range(0, kernel_elements, self.mac_chunk_size):
+                    stop = min(start + self.mac_chunk_size, kernel_elements)
+                    x = x_group[:, start:stop, :].permute(0, 2, 1).unsqueeze(1)
+                    w = w_group[:, start:stop].view(1, out_per_group, 1, stop - start)
+                    group_acc.add_(
+                        _signed_lut_product_codes(lut, x, w).sum(dim=-1, dtype=torch.int64)
+                    )
         compute_dtype = (
             torch.float32 if input.dtype in (torch.float16, torch.bfloat16) else input.dtype
         )

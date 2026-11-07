@@ -264,7 +264,7 @@
         }
       }
     },
-    "AOS_1": {
+    "UOS_1": {
       "isolated": {
         "conv1": {
           "accuracy": 0.8305,
@@ -320,7 +320,7 @@
         }
       }
     },
-    "AOS_2": {
+    "UOS_2": {
       "isolated": {
         "conv1": {
           "accuracy": 0.4214,

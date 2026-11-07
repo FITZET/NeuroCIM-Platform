@@ -13,6 +13,9 @@ GPT2_LARGE_REVISION = "32b71b12589c2f8d625668d2335a01cac3249519"
 GPT2_LARGE_FILENAME = "model.safetensors"
 GPT2_LARGE_SIZE = 3_247_159_078
 GPT2_LARGE_SHA256 = "5f47f3e12f91cd33b662ce7e433b6150ad5512b5884a2cee961b50e9c3bbebce"
+GPT2_LARGE_RUNTIME_FILENAME = "model.fp16.safetensors"
+GPT2_LARGE_RUNTIME_SIZE = 1_623_601_216
+GPT2_LARGE_RUNTIME_SHA256 = "9008e91f3c248005e27aa0a258f334029cccdd32f700a9c459b143b3eb1eccc3"
 WIKITEXT2_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 
 
@@ -111,8 +114,17 @@ def inspect_gpt2_resources(
     checkpoint = Path(checkpoint_path).expanduser().resolve()
     exists = checkpoint.is_file()
     size = checkpoint.stat().st_size if exists else None
-    expected_size = GPT2_LARGE_SIZE if model_variant == "gpt2-large" else None
-    expected_hash = GPT2_LARGE_SHA256 if model_variant == "gpt2-large" else None
+    is_runtime_fp16 = (
+        model_variant == "gpt2-large" and checkpoint.name == GPT2_LARGE_RUNTIME_FILENAME
+    )
+    expected_size = (
+        GPT2_LARGE_RUNTIME_SIZE if is_runtime_fp16 else
+        GPT2_LARGE_SIZE if model_variant == "gpt2-large" else None
+    )
+    expected_hash = (
+        GPT2_LARGE_RUNTIME_SHA256 if is_runtime_fp16 else
+        GPT2_LARGE_SHA256 if model_variant == "gpt2-large" else None
+    )
     revision = GPT2_LARGE_REVISION if model_variant == "gpt2-large" else "local-gpt2-small"
     problems: list[str] = []
     if not exists:
@@ -132,7 +144,7 @@ def inspect_gpt2_resources(
     cuda_free: int | None = None
     required_ram = 8 * 1024**3 if model_variant == "gpt2-large" else None
     required_commit = (
-        (6 if device == "cuda" else 8) * 1024**3
+        ((5 if is_runtime_fp16 else 10) if device == "cuda" else 10) * 1024**3
         if model_variant == "gpt2-large" else None
     )
     required_cuda = 6 * 1024**3 if model_variant == "gpt2-large" and device == "cuda" else None

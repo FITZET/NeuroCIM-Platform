@@ -41,10 +41,11 @@
     },
     "squeezenet1_1-cifar10": {
       "filename": "squeezenet1_1_cifar10.pt",
-      "sha256": "df967fd502b9d8fe2e7dea77d8363ad7fe14df04efcc173df1f94fc05f7cfe4c",
-      "training": "local reproducible training, seed 42, 100 epochs",
-      "best_validation_accuracy": 0.7716,
-      "test_accuracy": 0.7654
+      "sha256": "5fe061ba144cc2b9890b47b3a395d36c7195051aea894bbaed3a245694fde196",
+      "training": "local reproducible training, seed 42, 160 epochs, native-32 Fire/BN topology",
+      "best_validation_accuracy": 0.924,
+      "test_accuracy": 0.9168,
+      "test_samples": 10000
     }
   }
 }

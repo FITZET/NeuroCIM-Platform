@@ -54,6 +54,11 @@ class FaultLayerMixin:
         self.register_buffer("input_zero_point", torch.tensor(0, dtype=torch.int64), persistent=False)
         self.register_buffer("weight_scale", torch.tensor([1.0]), persistent=False)
         self.register_buffer("weight_zero_point", torch.tensor([0], dtype=torch.int64), persistent=False)
+        self.register_buffer(
+            "_cached_quantized_weight", torch.empty(0, dtype=torch.int64), persistent=False
+        )
+        self._cached_weight_version = -1
+        self._ideal_product_lut = False
         if error_model is not None:
             self.set_error_model(error_model)
 
@@ -131,15 +136,26 @@ class FaultLayerMixin:
         if torch.any((wz < 0) | (wz > 255)):
             raise ValueError("weight_zero_point values must be in [0, 255]")
 
-        self.hardware_lut = torch.round(lut_tensor).to(torch.int64)
+        table = torch.round(lut_tensor).to(torch.int64)
+        if (int(table.min()) >= torch.iinfo(torch.int32).min
+                and int(table.max()) <= torch.iinfo(torch.int32).max):
+            table = table.to(torch.int32)
+        self.hardware_lut = table
+        codes = torch.arange(256, dtype=torch.int64, device=self.weight.device)
+        self._ideal_product_lut = bool(torch.equal(
+            self.hardware_lut.to(torch.int64), codes[:, None] * codes[None, :]
+        ))
         self.input_scale = torch.tensor(float(input_scale), dtype=torch.float64, device=self.weight.device)
         self.input_zero_point = torch.tensor(int(input_zero_point), dtype=torch.int64, device=self.weight.device)
         self.weight_scale = ws
         self.weight_zero_point = wz
+        self._cached_weight_version = -1
         return self
 
     def clear_hardware_lut(self) -> FaultLayerMixin:
         self.hardware_lut = torch.empty(0, dtype=torch.int64, device=self.weight.device)
+        self._ideal_product_lut = False
+        self._cached_weight_version = -1
         return self
 
     def configure_hardware_lut_from_csv(
@@ -174,6 +190,28 @@ class FaultLayerMixin:
 
         lut = self.hardware_lut
         return lut[qw, qx] - lut[zw, qx] - lut[qw, zx] + lut[zw, zx]
+
+    def _quantized_weight(self, scale: Tensor, zero_point: Tensor) -> Tensor:
+        """Cache quantized weights and invalidate after every optimizer update."""
+
+        version = int(self.weight._version)
+        if (self._cached_weight_version != version
+                or self._cached_quantized_weight.shape != self.weight.shape):
+            shape = [self.weight.shape[0]] + [1] * (self.weight.ndim - 1)
+            self._cached_quantized_weight = self._quantize_uint8(
+                self.weight.detach(),
+                scale.to(self.weight.dtype).view(*shape),
+                zero_point.view(*shape),
+            )
+            self._cached_weight_version = version
+        return self._cached_quantized_weight
+
+    @staticmethod
+    def _ideal_code_mm(left: Tensor, right: Tensor) -> Tensor:
+        # Imported lazily so the reusable base layer remains usable without the
+        # full platform package in simple floating-point projects.
+        from neurocim_opt.layers import _ideal_signed_code_mm
+        return _ideal_signed_code_mm(left.to(torch.int16), right.to(torch.int16))
 
     def _inject_output_error(self, output: Tensor) -> Tensor:
         if not self.fault_enable or self.error_model is None:
@@ -279,11 +317,7 @@ class FaultConv2d(FaultLayerMixin, nn.Conv2d):
             ws = ws.expand(self.out_channels)
         if wz.numel() == 1:
             wz = wz.expand(self.out_channels)
-        qw_all = self._quantize_uint8(
-            self.weight,
-            ws.to(self.weight.dtype).view(-1, 1, 1, 1),
-            wz.view(-1, 1, 1, 1),
-        ).reshape(self.out_channels, kernel_elements)
+        qw_all = self._quantized_weight(ws, wz).reshape(self.out_channels, kernel_elements)
 
         for group in range(self.groups):
             out_start = group * out_per_group
@@ -294,14 +328,22 @@ class FaultConv2d(FaultLayerMixin, nn.Conv2d):
             qw_group = qw_all[out_start:out_stop]
             zw_group = wz[out_start:out_stop]
             group_acc = accumulator[:, out_start:out_stop, :]
-            for start in range(0, kernel_elements, self.mac_chunk_size):
-                stop = min(start + self.mac_chunk_size, kernel_elements)
-                qx = qx_group[:, start:stop, :].permute(0, 2, 1).unsqueeze(1)
-                qw = qw_group[:, start:stop].view(1, out_per_group, 1, stop - start)
-                products = self._lut_product(
-                    qx, qw, zx, zw_group.view(1, out_per_group, 1, 1)
+            if self._ideal_product_lut:
+                centered_x = (qx_group - zx).permute(0, 2, 1).reshape(
+                    batch * locations, kernel_elements
                 )
-                group_acc.add_(products.sum(dim=-1))
+                centered_w = qw_group - zw_group.view(-1, 1)
+                exact = self._ideal_code_mm(centered_x, centered_w)
+                group_acc.copy_(exact.reshape(batch, locations, out_per_group).permute(0, 2, 1))
+            else:
+                for start in range(0, kernel_elements, self.mac_chunk_size):
+                    stop = min(start + self.mac_chunk_size, kernel_elements)
+                    qx = qx_group[:, start:stop, :].permute(0, 2, 1).unsqueeze(1)
+                    qw = qw_group[:, start:stop].view(1, out_per_group, 1, stop - start)
+                    products = self._lut_product(
+                        qx, qw, zx, zw_group.view(1, out_per_group, 1, 1)
+                    )
+                    group_acc.add_(products.sum(dim=-1, dtype=torch.int64))
 
         output = accumulator.to(input.dtype) * (
             self.input_scale.to(input.device, input.dtype) * ws.to(input.device, input.dtype).view(1, -1, 1)
@@ -401,24 +443,23 @@ class FaultLinear(FaultLayerMixin, nn.Linear):
             ws = ws.expand(self.out_features)
         if wz.numel() == 1:
             wz = wz.expand(self.out_features)
-        qw = self._quantize_uint8(
-            self.weight,
-            ws.to(self.weight.dtype).view(-1, 1),
-            wz.view(-1, 1),
-        )
-        accumulator = torch.zeros(
-            (flat_input.shape[0], self.out_features), dtype=torch.int64, device=input.device
-        )
-        for start in range(0, self.in_features, self.mac_chunk_size):
-            stop = min(start + self.mac_chunk_size, self.in_features)
-            accumulator.add_(
-                self._lut_product(
-                    qx[:, None, start:stop],
-                    qw[None, :, start:stop],
-                    zx,
-                    wz.view(1, -1, 1),
-                ).sum(dim=-1)
+        qw = self._quantized_weight(ws, wz)
+        if self._ideal_product_lut:
+            accumulator = self._ideal_code_mm(qx - zx, qw - wz.view(-1, 1))
+        else:
+            accumulator = torch.zeros(
+                (flat_input.shape[0], self.out_features), dtype=torch.int64, device=input.device
             )
+            for start in range(0, self.in_features, self.mac_chunk_size):
+                stop = min(start + self.mac_chunk_size, self.in_features)
+                accumulator.add_(
+                    self._lut_product(
+                        qx[:, None, start:stop],
+                        qw[None, :, start:stop],
+                        zx,
+                        wz.view(1, -1, 1),
+                    ).sum(dim=-1, dtype=torch.int64)
+                )
         output = accumulator.to(input.dtype) * (
             self.input_scale.to(input.device, input.dtype) * ws.to(input.device, input.dtype).view(1, -1)
         )

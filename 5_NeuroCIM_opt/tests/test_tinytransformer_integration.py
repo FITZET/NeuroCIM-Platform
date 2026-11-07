@@ -15,7 +15,7 @@ sys.path.insert(0, str(PROJECT / "3_models/TinyTransformer"))
 def _resources() -> tuple[Path, Path, Path]:
     checkpoint = PROJECT / "3_models/TinyTransformer/checkpoint/cct_7_3x1_32_cifar10.pth"
     scales = PROJECT / "3_models/TinyTransformer/checkpoint/input_scales.json"
-    error = ROOT / "outputs/error_models/03_AOS_1/error_model.json"
+    error = ROOT / "outputs/error_models/03_UOS_1/error_model.json"
     if not all(path.is_file() for path in (checkpoint, scales, error)):
         pytest.skip("TinyTransformer integration resources are not installed")
     return checkpoint, scales, error

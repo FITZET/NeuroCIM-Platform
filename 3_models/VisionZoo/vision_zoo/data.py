@@ -39,7 +39,11 @@ def create_mnist_loaders(
     full = datasets.MNIST(root, train=True, transform=transform, download=download)
     test = datasets.MNIST(root, train=False, transform=transform, download=download)
     training, validation = _split_indices(len(full), validation_size, seed)
-    common = {"num_workers": num_workers, "worker_init_fn": _seed_worker}
+    common = {
+        "num_workers": num_workers, "worker_init_fn": _seed_worker,
+        "pin_memory": torch.cuda.is_available(),
+        "persistent_workers": num_workers > 0,
+    }
     return (
         DataLoader(Subset(full, training), batch_size=batch_size, shuffle=True,
                    generator=torch.Generator().manual_seed(seed), **common),
@@ -67,7 +71,11 @@ def create_cifar10_loaders(
     evaluation.transform = evaluation_transform
     test = datasets.CIFAR10(root, train=False, transform=evaluation_transform, download=False)
     training, validation = _split_indices(len(augmented), validation_size, seed)
-    common = {"num_workers": num_workers, "worker_init_fn": _seed_worker}
+    common = {
+        "num_workers": num_workers, "worker_init_fn": _seed_worker,
+        "pin_memory": torch.cuda.is_available(),
+        "persistent_workers": num_workers > 0,
+    }
     return (
         DataLoader(Subset(augmented, training), batch_size=batch_size, shuffle=True,
                    generator=torch.Generator().manual_seed(seed), **common),
