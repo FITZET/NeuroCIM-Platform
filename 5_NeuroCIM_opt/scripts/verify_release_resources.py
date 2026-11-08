@@ -37,10 +37,38 @@ MNIST_FILES = (
 )
 CIFAR_FILES = ("batches.meta", "test_batch", *(f"data_batch_{index}" for index in range(1, 6)))
 GPT2_LARGE_MANIFEST = Path(__file__).resolve().parents[1] / "packaging/gpt2-large-resources.json"
+GPT2_LARGE_RUNTIME = {
+    "path": "model.fp16.safetensors",
+    "size": 1623601216,
+    "sha256": "9008e91f3c248005e27aa0a258f334029cccdd32f700a9c459b143b3eb1eccc3",
+}
 VISION_ZOO_IDS = {
     "resnet8-mnist", "mobilenetv2-cifar10", "vgg11-bn-cifar10",
     "squeezenet1_1-cifar10",
 }
+
+
+def verify_cuda_runtime(root: Path) -> int:
+    """Reject a GPU release that omitted CUDA runtime libraries."""
+    internal = root / "NeuroCIM" / "_internal"
+    if not internal.is_dir():
+        raise FileNotFoundError(f"Frozen runtime directory is missing: {internal}")
+    required_patterns = (
+        "torch/lib/torch_cuda.dll",
+        "torch/lib/c10_cuda.dll",
+        "torch/lib/cudnn64_*.dll",
+        "torch/lib/cublas64_12.dll",
+        "torch/lib/cublasLt64_12.dll",
+        "torch/lib/cusparse64_12.dll",
+        "torch/lib/nvrtc64_*.dll",
+    )
+    matched = 0
+    for pattern in required_patterns:
+        candidates = tuple(internal.glob(pattern))
+        if not candidates or any(path.stat().st_size == 0 for path in candidates):
+            raise FileNotFoundError(f"Required CUDA runtime library is missing: {pattern}")
+        matched += len(candidates)
+    return matched
 
 
 def require_file(root: Path, relative: str) -> Path:
@@ -73,12 +101,20 @@ def verify_gpt2_large(root: Path) -> int:
     resource_root = root / "3_models/GPT2/checkpoint/gpt2-large"
     checked = 0
     for item in manifest["model"]["files"]:
+        if item["path"] == "model.safetensors":
+            continue
         path = require_file(resource_root, item["path"])
         if path.stat().st_size != int(item["size"]):
             raise ValueError(f"GPT-2-large size mismatch: {path}")
         if sha256_file(path) != item["sha256"]:
             raise ValueError(f"GPT-2-large SHA256 mismatch: {path}")
         checked += 1
+    runtime_path = require_file(resource_root, GPT2_LARGE_RUNTIME["path"])
+    if runtime_path.stat().st_size != GPT2_LARGE_RUNTIME["size"]:
+        raise ValueError(f"GPT-2-large FP16 size mismatch: {runtime_path}")
+    if sha256_file(runtime_path) != GPT2_LARGE_RUNTIME["sha256"]:
+        raise ValueError(f"GPT-2-large FP16 SHA256 mismatch: {runtime_path}")
+    checked += 1
     dataset_root = resource_root / "wikitext-2-raw-v1"
     for item in manifest["dataset"]["files"]:
         path = require_file(dataset_root, item["raw_name"])
@@ -139,6 +175,7 @@ def main() -> int:
     parser.add_argument("release_root", type=Path)
     args = parser.parse_args()
     root = args.release_root.resolve(strict=True)
+    cuda_library_count = verify_cuda_runtime(root)
 
     for relative in MODEL_FILES:
         require_file(root, relative)
@@ -170,7 +207,8 @@ def main() -> int:
         f"{model_count} verified model checkpoints plus "
         f"{gpt2_large_count} GPT-2-large/WikiText files, "
         "MNIST 70000, CIFAR-10 60000, "
-        f"{len(csv_files)} device CSV files"
+        f"{len(csv_files)} device CSV files, "
+        f"{cuda_library_count} CUDA runtime libraries"
     )
     return 0
 

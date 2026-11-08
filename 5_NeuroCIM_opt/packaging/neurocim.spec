@@ -49,7 +49,7 @@ a = Analysis(
         "dask", "distributed", "pyarrow", "numba", "llvmlite",
         "sphinx", "docutils", "babel", "lxml", "win32com",
         "cryptography", "bcrypt", "fsspec", "scipy",
-        "torch.utils.tensorboard",
+        "torch.utils.tensorboard", "torchaudio",
         "PyQt5", "PyQt6", "PySide2", "tables", "sqlalchemy", "s3fs",
     ],
     noarchive=False,

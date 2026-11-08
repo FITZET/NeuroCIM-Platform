@@ -11,7 +11,9 @@ sys.path.insert(0, str(ROOT))
 from neurocim_opt.training_service import (
     ErrorAwareTrainingService, TrainingCancelled, TrainingRequest, TrainingResources,
     TINYTRANSFORMER_EVAL_BATCH_LIMIT,
-    _configure_tinytransformer_head_finetuning, canonical_model_id,
+    TERMINAL_FINETUNE_MODULES, _configure_terminal_finetuning,
+    _configure_tinytransformer_head_finetuning, _set_frozen_modules_eval,
+    canonical_model_id,
 )
 
 
@@ -161,6 +163,41 @@ def test_tinytransformer_finetuning_freezes_backbone() -> None:
         "classifier.fc.weight", "classifier.fc.bias",
     }
     assert sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad) == 2_827
+
+
+@pytest.mark.parametrize("model_id", sorted(TERMINAL_FINETUNE_MODULES))
+def test_every_image_model_only_finetunes_registered_terminal_layers(model_id: str) -> None:
+    from neurocim_opt.model_registry import builtin_registry
+
+    model = builtin_registry(ROOT.parent).get(model_id).create_model()
+    trainable = set(_configure_terminal_finetuning(model, model_id))
+    prefixes = TERMINAL_FINETUNE_MODULES[model_id]
+    assert trainable
+    assert all(any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+               for name in trainable)
+    assert any(not parameter.requires_grad for parameter in model.parameters())
+
+
+def test_frozen_batchnorm_and_dropout_stay_in_evaluation_mode() -> None:
+    import torch
+
+    model = torch.nn.Sequential(
+        torch.nn.BatchNorm1d(4), torch.nn.Dropout(0.5), torch.nn.Linear(4, 2),
+    )
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for parameter in model[2].parameters():
+        parameter.requires_grad_(True)
+    model.train()
+    _set_frozen_modules_eval(model)
+    assert not model[0].training
+    assert not model[1].training
+    assert model[2].training
+
+
+def test_training_defaults_to_one_epoch() -> None:
+    request = TrainingRequest(ROOT.parent, ROOT / "error.json", ROOT / "out")
+    assert request.epochs == 1
 
 
 def test_tinytransformer_training_uses_two_heads_but_evaluation_uses_full_graph(

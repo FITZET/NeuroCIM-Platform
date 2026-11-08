@@ -86,6 +86,20 @@ TINYTRANSFORMER_FINETUNE_MODULES = (
     "classifier.fc",
 )
 
+# Error-aware fine-tuning touches only the terminal one or two computational
+# layers. The fitted device LUT remains active throughout the forward pass,
+# while the feature extractor stays identical to the pretrained checkpoint.
+TERMINAL_FINETUNE_MODULES = {
+    "lenet5-mnist": ("fc2", "fc3"),
+    "bnn-mnist": ("fc1", "bn3", "fc2"),
+    "resnet20-cifar10": ("fc",),
+    "resnet8-mnist": ("fc",),
+    "mobilenetv2-cifar10": ("classifier.1",),
+    "vgg11-bn-cifar10": ("classifier.3", "classifier.6"),
+    "squeezenet1_1-cifar10": ("classifier.1",),
+    "tinytransformer-cifar10": TINYTRANSFORMER_FINETUNE_MODULES,
+}
+
 
 _MODEL_ALIASES = {
     "lenet5": "lenet5-mnist", "lenet-5": "lenet5-mnist",
@@ -187,6 +201,32 @@ def _configure_tinytransformer_head_finetuning(model: nn.Module) -> tuple[str, .
         for parameter in modules[name].parameters():
             parameter.requires_grad_(True)
     return tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+
+
+def _configure_terminal_finetuning(model: nn.Module, model_id: str) -> tuple[str, ...]:
+    """Freeze a model and expose only its final one or two task layers."""
+    try:
+        selected_modules = TERMINAL_FINETUNE_MODULES[model_id]
+    except KeyError as exc:
+        raise ValueError(f"No terminal fine-tuning scope is registered for {model_id}") from exc
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    modules = dict(model.named_modules())
+    missing = [name for name in selected_modules if name not in modules]
+    if missing:
+        raise RuntimeError(f"{model_id} terminal fine-tuning modules are missing: {missing}")
+    for name in selected_modules:
+        for parameter in modules[name].parameters():
+            parameter.requires_grad_(True)
+    return tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+
+
+def _set_frozen_modules_eval(model: nn.Module) -> None:
+    """Disable running statistics and dropout in every fully frozen subtree."""
+    for module in model.modules():
+        parameters = tuple(module.parameters())
+        if not any(parameter.requires_grad for parameter in parameters):
+            module.eval()
 
 
 class ErrorAwareTrainingService:
@@ -586,6 +626,8 @@ class ErrorAwareTrainingService:
         }
 
         model = device_nonidealities(training_differential(base(), device_lut, True)).to(resources.device)
+        selected_finetune_modules = TERMINAL_FINETUNE_MODULES[resources.model_id]
+        _configure_terminal_finetuning(model, resources.model_id)
         training_initial_state = deepcopy(model.state_dict())
         trainable_names = {
             name for name, parameter in model.named_parameters() if parameter.requires_grad
@@ -611,6 +653,7 @@ class ErrorAwareTrainingService:
         training_oom_retries = 0
         for epoch in range(request.epochs):
             model.train().to(resources.device)
+            _set_frozen_modules_eval(model)
             total_loss = 0.0
             correct = samples = 0
             for batch_index, (inputs, targets) in enumerate(train_loader):
@@ -782,11 +825,8 @@ class ErrorAwareTrainingService:
                 "dataset_root": str(resources.dataset_root),
             },
             "training_strategy": {
-                "scope": (
-                    "differential_sequence_pooling_and_classifier_head_training; "
-                    "full_network_differential_evaluation"
-                    if resources.model_id == "tinytransformer-cifar10" else "full_network"
-                ),
+                "scope": "terminal_one_or_two_layers",
+                "trainable_modules": list(selected_finetune_modules),
                 "trainable_parameter_names": sorted(trainable_names),
                 "requested_batch_size": request.batch_size,
                 "effective_train_batch_size": train_loader.batch_size,
@@ -1001,6 +1041,7 @@ class ErrorAwareTrainingService:
         accumulation = request.gradient_accumulation_steps
         for epoch in range(request.epochs):
             model.train()
+            _set_frozen_modules_eval(model)
             optimizer.zero_grad(set_to_none=True)
             total_loss = 0.0
             correct = tokens = epoch_batches = 0

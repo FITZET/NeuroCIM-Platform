@@ -30,6 +30,13 @@ if (-not $SkipTests) {
     }
 }
 
+# Never publish a GPU-labelled archive from a CPU-only or non-functional CUDA
+# environment.  The frozen EXE is checked again after packaging.
+New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+$sourceGpuReport = Join-Path $releaseRoot "source_gpu_smoke.json"
+python (Join-Path $platform "scripts\gpu_release_smoke.py") --output $sourceGpuReport
+if ($LASTEXITCODE -ne 0) { throw "Source CUDA release gate failed" }
+
 $appTarget = Join-Path $portable "NeuroCIM"
 if (-not $ReuseFrozen) {
     if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable -Recurse -Force }
@@ -101,7 +108,24 @@ Copy-Item -LiteralPath (Join-Path $project "3_models\Resnet20\output\formal\inpu
 Copy-ResourceTree (Join-Path $project "3_models\TinyTransformer\checkpoint") (Join-Path $portable "3_models\TinyTransformer\checkpoint")
 Copy-ResourceTree (Join-Path $project "3_models\VisionZoo\checkpoint") (Join-Path $portable "3_models\VisionZoo\checkpoint")
 Copy-ResourceTree (Join-Path $project "3_models\GPT2\checkpoint") (Join-Path $portable "3_models\GPT2\checkpoint")
-Copy-ResourceTree (Join-Path $project "0_data") (Join-Path $portable "0_data")
+# GPT-2-large runs from the verified FP16 checkpoint.  Shipping the original
+# FP32 checkpoint as well adds 3.25 GB without providing another runtime path.
+$redundantGpt2Large = Join-Path $portable "3_models\GPT2\checkpoint\gpt2-large\model.safetensors"
+if (Test-Path -LiteralPath $redundantGpt2Large) {
+    Remove-Item -LiteralPath $redundantGpt2Large -Force
+}
+$measurementTarget = Join-Path $portable "0_data"
+if (Test-Path -LiteralPath $measurementTarget) {
+    Remove-Item -LiteralPath $measurementTarget -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $measurementTarget | Out-Null
+$measurementFiles = Get-ChildItem -LiteralPath (Join-Path $project "0_data") -Filter "*.csv" -File
+if ($measurementFiles.Count -lt 5) {
+    throw "Expected at least five device measurement CSV files"
+}
+foreach ($file in $measurementFiles) {
+    Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $measurementTarget $file.Name) -Force
+}
 Copy-Item -LiteralPath (Join-Path $platform "model_resource_manifest.json") -Destination $portable -Force
 
 $mnistSource = Join-Path $project "data\mnist\MNIST\raw"
@@ -135,6 +159,7 @@ Copy-ResourceTree (Join-Path $project "3_models\GPT2\licenses") (Join-Path $lice
 $smokeImage = Join-Path $releaseRoot "release_smoke.png"
 python (Join-Path $platform "scripts\verify_frozen_app.py") (Join-Path $appTarget "NeuroCIM.exe") $smokeImage
 if ($LASTEXITCODE -ne 0) { throw "Frozen application smoke test failed" }
+Copy-Item -LiteralPath (Join-Path $releaseRoot "release_gpu_smoke.json") -Destination (Join-Path $portable "gpu_build_diagnostics.json") -Force
 
 $gpuDiagnosticsLauncher = @'
 @echo off
@@ -162,7 +187,7 @@ $manifestFiles = Get-ChildItem -LiteralPath $portable -Recurse -File
 $manifest = [ordered]@{
     format_version = 1
     product = "NeuroCIM DRAM CIM Simulation Platform"
-    platform = "Windows x64"
+    platform = "Windows x64 (CPU fallback + NVIDIA CUDA 12.1)"
     built_at = (Get-Date).ToString("o")
     python = (python --version 2>&1 | Out-String).Trim()
     file_count = $manifestFiles.Count
@@ -171,6 +196,7 @@ $manifest = [ordered]@{
     external_assets = @()
     bundled_assets = @("ten model checkpoints", "MNIST", "CIFAR-10", "WikiText-2 raw-v1", "device measurement CSV")
     neurosim_license = "CC BY-NC 4.0"
+    gpu_validation = (Get-Content -LiteralPath (Join-Path $portable "gpu_build_diagnostics.json") -Raw | ConvertFrom-Json)
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $portable "release_manifest.json") -Encoding UTF8
 

@@ -69,7 +69,7 @@ def test_main_window_shows_live_model_catalog() -> None:
     assert catalog is not None
     assert catalog.table.rowCount() == len(FRONTEND_MODEL_IDS)
     rows = {
-        catalog.table.item(row, 1).text(): catalog.table.item(row, 7).text()
+        catalog.table.item(row, 1).text(): catalog.table.item(row, 6).text()
         for row in range(catalog.table.rowCount())
     }
     assert tuple(spec.model_id for spec in catalog.specs) == FRONTEND_MODEL_IDS
@@ -78,14 +78,15 @@ def test_main_window_shows_live_model_catalog() -> None:
         "BNN (BinaryNet)", "TinyTransformer", "GPT-2-large",
     }
     assert rows["SqueezeNet"] == rows["MobileNetV2"]
-    report_baselines = {
+    float_metrics = {
         catalog.table.item(row, 1).text(): catalog.table.item(row, 4).text()
         for row in range(catalog.table.rowCount())
     }
-    assert report_baselines["ResNet-8"] == "95.00%"
-    assert report_baselines["LeNet-5"] == "98.69%"
-    assert report_baselines["BNN (BinaryNet)"] == "99.00%"
-    assert report_baselines["GPT-2-large"] == "PPL=30.69"
+    assert catalog.table.horizontalHeaderItem(4).text() == "浮点精度"
+    assert float_metrics["ResNet-8"] == "99.36%"
+    assert float_metrics["LeNet-5"] == "98.69%"
+    assert float_metrics["BNN (BinaryNet)"] == "99.19%"
+    assert float_metrics["GPT-2-large"] == "PPL=30.69"
     single = tabs.widget(2).findChild(UnifiedSingleInferenceWidget)
     batch = tabs.widget(3).findChild(UnifiedBatchInferenceWidget)
     assert single is not None and batch is not None

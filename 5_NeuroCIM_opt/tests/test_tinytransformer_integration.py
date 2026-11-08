@@ -37,7 +37,7 @@ def test_real_signed_differential_single_inference() -> None:
     from neurocim_opt.application import PlatformService
 
     checkpoint, scales, error = _resources()
-    dataset = Path(r"E:\datasets")
+    dataset = PROJECT / "data"
     if not (dataset / "cifar-10-batches-py/test_batch").is_file():
         pytest.skip("CIFAR-10 is not installed")
     outcome = PlatformService.infer_registered_single(

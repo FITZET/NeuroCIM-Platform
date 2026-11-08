@@ -39,6 +39,7 @@ class ModelSpec:
     report_baseline: str = ""
     model_family: str = ""
     verified_baseline: str = ""
+    float_metric: str = ""
 
     @property
     def checkpoint_available(self) -> bool:
@@ -135,6 +136,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             report_task="手写数字识别", report_dataset="MNIST",
             report_baseline="98.69%", model_family="经典 CNN",
             verified_baseline="98.69%（完整测试集）",
+            float_metric="98.69%",
         )
     )
     vision_models = (
@@ -222,6 +224,12 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
                 "vgg11-bn-cifar10": "92.78%（完整测试集）",
                 "squeezenet1_1-cifar10": "91.68%（完整测试集）",
             }.get(model_id, ""),
+            float_metric={
+                "resnet8-mnist": "99.36%",
+                "mobilenetv2-cifar10": "94.05%",
+                "vgg11-bn-cifar10": "92.78%",
+                "squeezenet1_1-cifar10": "91.68%",
+            }.get(model_id, ""),
         ))
     registry.register(
         ModelSpec(
@@ -260,6 +268,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             report_task="手写数字识别", report_dataset="MNIST",
             report_baseline="99.00%", model_family="二值网络",
             verified_baseline="99.19%（完整测试集）",
+            float_metric="99.19%",
         )
     )
     registry.register(
@@ -283,6 +292,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             report_task="情感分类", report_dataset="合成数据",
             report_baseline="99.60%", model_family="轻量语言模型",
             verified_baseline="待迁移：当前为 CIFAR-10 图像分类 96.53%（完整测试集）",
+            float_metric="96.53%",
         )
     )
     registry.register(
@@ -347,6 +357,7 @@ def builtin_registry(project_root: str | Path) -> ModelRegistry:
             report_task="语言建模", report_dataset="WikiText-2",
             report_baseline="PPL=30.69", model_family="大语言模型",
             verified_baseline="PPL=15.02（2048 token 冒烟；完整 WikiText-2 待复验）",
+            float_metric="PPL=30.69",
         )
     )
     return registry

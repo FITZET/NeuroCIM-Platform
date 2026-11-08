@@ -20,7 +20,7 @@ def main() -> int:
         PLATFORM_ROOT
         / "outputs/demo/uos1_gui/fit_result/error_model/error_model.json"
     ).resolve()
-    dataset_root = Path(r"E:\datasets").resolve()
+    dataset_root = (PROJECT_ROOT / "data").resolve()
     output_dir = (PLATFORM_ROOT / "outputs/uos1_workflow").resolve()
 
     application = QApplication.instance() or QApplication([])

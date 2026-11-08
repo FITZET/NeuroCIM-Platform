@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 plt.rcParams['font.sans-serif']=['Microsoft YaHei','SimHei','Arial Unicode MS']
 plt.rcParams['axes.unicode_minus']=False
-OUT=Path(r'E:\Prj_Python\DRAM_CIM_Platform\5_NeuroCIM_opt\docs\report_assets')
+OUT=Path(__file__).resolve().parent
 OUT.mkdir(parents=True,exist_ok=True)
 
 def diagram(name,title,columns,arrows,footer=None):

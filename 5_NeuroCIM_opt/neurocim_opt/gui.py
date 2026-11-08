@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import sys
 import traceback
 from time import monotonic
 from typing import Any
@@ -365,7 +366,14 @@ class WorkflowCoordinator(QObject):
 
     def __init__(self, platform_root: Path):
         super().__init__()
-        state_root = Path(platform_root).resolve() / "outputs" / "workflow"
+        # Frozen applications can live below Program Files or another read-only
+        # location.  Keep mutable workflow state in the per-user output root;
+        # bundled datasets and checkpoints are still resolved beside the EXE.
+        state_root = (
+            output_root() / "workflow"
+            if getattr(sys, "frozen", False)
+            else Path(platform_root).resolve() / "outputs" / "workflow"
+        )
         self.registry = ErrorModelRegistry(state_root / "error_model_registry.json")
         self.context = WorkflowContext(state_root / "workflow_context.json")
         self.model_registry = builtin_registry(Path(platform_root).resolve().parent)
@@ -1405,7 +1413,7 @@ class CellFittingWidget(QWidget):
         try:
             self._persist_settings(); source = self._source()
             target = Path(output_dir).resolve() if output_dir else (Path(self.output_edit.text()).expanduser().resolve()
-                if self.output_edit.text().strip() else self.platform_root / "outputs" / "gui_runs" /
+                if self.output_edit.text().strip() else output_root() / "gui_runs" /
                 datetime.now().strftime("%Y%m%d-%H%M%S") / "cell_fit")
             self.output_edit.setText(str(target)); self.last_outcome = None
             self.fit_button.setEnabled(False); self.preview_button.setEnabled(False); self.progress.setValue(0)
@@ -1670,7 +1678,7 @@ class MacAnalysisWidget(QWidget):
     def start_fit(self, output_dir: Path | None = None) -> None:
         try:
             self._persist_settings(); source = self._source(); selection = self._selection()
-            output = Path(output_dir) if output_dir else self.platform_root / "outputs" / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "mac_model"
+            output = Path(output_dir) if output_dir else output_root() / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "mac_model"
             self.fit_button.setEnabled(False); self.preview_button.setEnabled(False); self.progress.setRange(0, 0)
             self.log.appendPlainText(f"正在拟合 {source}；选中配置={selection}")
             self.worker = MacFitThread(self.service, source, output, self._options(), **selection)
@@ -2027,8 +2035,7 @@ class SingleInferenceWidget(QWidget):
             )
 
     def _model_defaults(self, model_id: str) -> dict[str, str]:
-        platform = self.project_root / "5_NeuroCIM_opt"
-        error_model = platform / "outputs/error_models/01_NMOS/error_model.json"
+        error_model = output_root() / "error_models/01_NMOS/error_model.json"
         spec = self.model_registry.get(model_id)
         dataset_id = spec.datasets[0]
         auxiliary = str(spec.auxiliary_resources[0]) if spec.auxiliary_resources else ""
@@ -2045,7 +2052,7 @@ class SingleInferenceWidget(QWidget):
 
     def _dataset_root(self, dataset: str) -> Path:
         configured = data_root(dataset)
-        candidates = [configured, Path(r"E:\datasets"), self.project_root / "data" / dataset]
+        candidates = [configured, self.project_root / "data" / dataset]
         marker = Path("MNIST/raw/t10k-images-idx3-ubyte") if dataset == "mnist" else Path("cifar-10-batches-py/test_batch")
         return next((path for path in candidates if (path / marker).is_file()), configured)
 
@@ -2338,7 +2345,7 @@ class SingleInferenceWidget(QWidget):
         self.result_table.resizeColumnsToContents(); self.top5_table.resizeColumnsToContents()
         _fit_result_table_height(self.result_table, max_visible_rows=3); _fit_result_table_height(self.top5_table, max_visible_rows=8)
         self.log.appendPlainText("单样本推理完成")
-        target = self.project_root / "5_NeuroCIM_opt/outputs/gui_inference"; target.mkdir(parents=True, exist_ok=True)
+        target = output_root() / "gui_inference"; target.mkdir(parents=True, exist_ok=True)
         suffix = (
             f"sample_{outcome.sample_index}" if outcome.true_label >= 0
             else "custom_" + datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -2391,7 +2398,7 @@ class BatchInferenceWidget(QWidget):
         self.require_workflow = require_workflow
         self.worker: BatchInferenceThread | None = None
         self.last_outcome: GroupedBatchInferenceOutcome | None = None
-        platform = self.project_root / "5_NeuroCIM_opt"
+        platform = output_root()
         layout = QVBoxLayout(self)
         self.setProperty("usesIndependentColumnScroll", True)
         left_card = QFrame(); left_card.setProperty("workCard", True)
@@ -2431,7 +2438,7 @@ class BatchInferenceWidget(QWidget):
         form.addRow("附加随机噪声", self.noise_combo)
         self.adc_combo = QComboBox(); _setup_adc_combo(self.adc_combo)
         form.addRow("ADC 量化", self.adc_combo)
-        self.error_model_edit = QLineEdit(str(platform / "outputs/error_models/01_NMOS/error_model.json"))
+        self.error_model_edit = QLineEdit(str(platform / "error_models/01_NMOS/error_model.json"))
         self.error_model_edit.setReadOnly(require_workflow)
         error_row = QHBoxLayout(); error_row.addWidget(self.error_model_edit)
         error_button = QPushButton("选择文件"); error_button.clicked.connect(self._browse_error_model)
@@ -2449,7 +2456,7 @@ class BatchInferenceWidget(QWidget):
 
         self.device_combo = QComboBox(); _setup_device_combo(self.device_combo)
         advanced_form.addRow("运行设备", self.device_combo)
-        default_output = platform / "outputs/gui_batch_inference" / "batch_result.json"
+        default_output = platform / "gui_batch_inference" / "batch_result.json"
         self.output_edit = QLineEdit(str(default_output))
         output_row = QHBoxLayout(); output_row.addWidget(self.output_edit)
         output_button = QPushButton("选择文件"); output_button.clicked.connect(self._browse_output)
@@ -2507,7 +2514,7 @@ class BatchInferenceWidget(QWidget):
             self.error_model_combo.setEnabled(False)
 
     def _dataset_root(self, dataset: str) -> Path:
-        candidates = [data_root(dataset), Path(r"E:\datasets"), self.project_root / "data" / dataset]
+        candidates = [data_root(dataset), self.project_root / "data" / dataset]
         marker = (Path("MNIST/raw/t10k-images-idx3-ubyte") if dataset == "mnist"
                   else Path("cifar-10-batches-py/test_batch"))
         return next((path for path in candidates if (path / marker).is_file()), candidates[0])
@@ -2765,7 +2772,7 @@ class ErrorAwareTrainingWidget(QWidget):
         self.service = ErrorAwareTrainingService()
         self.worker: TrainingThread | None = None
         self.last_outcome: TrainingOutcome | None = None
-        platform_root = self.project_root / "5_NeuroCIM_opt"
+        platform_root = output_root()
         layout = QVBoxLayout(self)
         self.setProperty("usesIndependentColumnScroll", True)
         left_card = QFrame(); left_card.setProperty("workCard", True)
@@ -2793,7 +2800,7 @@ class ErrorAwareTrainingWidget(QWidget):
         self.adc_combo = QComboBox(); _setup_adc_combo(self.adc_combo)
         form.addRow("ADC 量化", self.adc_combo)
         self.error_model_edit = QLineEdit(str(
-            platform_root / "outputs" / "error_models" / "01_NMOS" / "error_model.json"
+            platform_root / "error_models" / "01_NMOS" / "error_model.json"
         ))
         self.error_model_edit.setReadOnly(require_workflow)
         error_row = QHBoxLayout()
@@ -2852,7 +2859,7 @@ class ErrorAwareTrainingWidget(QWidget):
         _setup_device_combo(self.device_combo)
         advanced_form.addRow("运行设备", self.device_combo)
         self.output_edit = QLineEdit(str(
-            platform_root / "outputs" / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "training"
+            platform_root / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "training"
         ))
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_edit)
@@ -3229,7 +3236,7 @@ class PpaEvaluationWidget(QWidget):
         self.service = PlatformService()
         self.worker: PpaThread | None = None
         self.last_outcome: PpaOutcome | None = None
-        platform_root = self.project_root / "5_NeuroCIM_opt"
+        platform_root = output_root()
         layout = QVBoxLayout(self)
         description = QLabel(
             "导出正负差分跟踪数据并运行随软件提供的官方 NeuroSim 内核。"
@@ -3243,7 +3250,7 @@ class PpaEvaluationWidget(QWidget):
         self.model_combo.addItem("LeNet-5", "lenet5-mnist")
         form.addRow("模型", self.model_combo)
         self.checkpoint_edit = QLineEdit(
-            str(platform_root / "outputs" / "eat" / "01_NMOS" / "eat_checkpoint.pt")
+            str(platform_root / "eat" / "01_NMOS" / "eat_checkpoint.pt")
         )
         checkpoint_row = QHBoxLayout()
         checkpoint_row.addWidget(self.checkpoint_edit)
@@ -3252,7 +3259,7 @@ class PpaEvaluationWidget(QWidget):
         checkpoint_row.addWidget(checkpoint_button)
         form.addRow("Checkpoint", checkpoint_row)
         self.error_model_edit = QLineEdit(
-            str(platform_root / "outputs" / "error_models" / "01_NMOS" / "error_model.json")
+            str(platform_root / "error_models" / "01_NMOS" / "error_model.json")
         )
         self.error_model_combo = QComboBox(); form.addRow("误差建模方法", self.error_model_combo)
         self.error_model_edit.setReadOnly(require_workflow)
@@ -3343,7 +3350,7 @@ class PpaEvaluationWidget(QWidget):
         self.run_button.setEnabled(False)
         self.progress.setRange(0, 0)
         target = output_dir or (
-            self.project_root / "5_NeuroCIM_opt" / "outputs" / "gui_runs"
+            output_root() / "gui_runs"
             / datetime.now().strftime("%Y%m%d-%H%M%S") / "ppa"
         )
         self.log.appendPlainText(f"开始 NeuroSim PPA 评估：{target}")
@@ -3407,7 +3414,7 @@ class GPT2GenerationWidget(QWidget):
         self.model_variant = "gpt2-large"
         self.dataset_name = "wikitext2"
         self.dataset_root = model_root / "gpt2-large/wikitext-2-raw-v1"
-        platform_root = self.project_root / "5_NeuroCIM_opt"
+        platform_root = output_root()
 
         layout = QVBoxLayout(self)
         description = QLabel(
@@ -3425,7 +3432,7 @@ class GPT2GenerationWidget(QWidget):
         self.scales_edit = QLineEdit(str(model_root / "input_scales.json")); self.scales_edit.setReadOnly(True)
         form.addRow("输入尺度 JSON", self.scales_edit)
         self.error_model_combo = QComboBox(); form.addRow("误差建模方法", self.error_model_combo)
-        self.error_model_edit = QLineEdit(str(platform_root / "outputs/error_models/01_NMOS/error_model.json"))
+        self.error_model_edit = QLineEdit(str(platform_root / "error_models/01_NMOS/error_model.json"))
         self.error_model_edit.setReadOnly(require_workflow); form.addRow("误差模型文件", self.error_model_edit)
         self.max_tokens = QSpinBox(); self.max_tokens.setRange(1, 128); self.max_tokens.setValue(24)
         form.addRow("生成 Token 数", self.max_tokens)
@@ -3574,7 +3581,7 @@ class GPT2GenerationWidget(QWidget):
                 top_row += 1
         self.output_text.setPlainText("\n\n".join(sections))
         self.result_table.resizeColumnsToContents(); self.top5_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=3); _fit_result_table_height(self.top5_table, max_visible_rows=8)
-        output = self.project_root / "5_NeuroCIM_opt/outputs/gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "gpt2"
+        output = output_root() / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "gpt2"
         output.mkdir(parents=True, exist_ok=True)
         result_path = output / "generation_result.json"
         result_path.write_text(json.dumps(outcome.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3620,7 +3627,7 @@ class GPT2BatchInferenceWidget(QWidget):
         self.model_variant = "gpt2-large"
         self.dataset_name = "prompt_text"
         self.dataset_root = checkpoint_root / "tokenizer"
-        platform_root = self.project_root / "5_NeuroCIM_opt"
+        platform_root = output_root()
         layout = QVBoxLayout(self)
         description = QLabel(
             "对多条提示词执行浮点、理想差分和器件误差差分生成，统计器件输出相对浮点输出的 Token 一致率。"
@@ -3635,7 +3642,7 @@ class GPT2BatchInferenceWidget(QWidget):
         form.addRow("Checkpoint", self.checkpoint_edit)
         form.addRow("分词器", self.tokenizer_edit)
         self.error_model_combo = QComboBox(); form.addRow("误差建模方法", self.error_model_combo)
-        self.error_model_edit = QLineEdit(str(platform_root / "outputs/error_models/01_NMOS/error_model.json"))
+        self.error_model_edit = QLineEdit(str(platform_root / "error_models/01_NMOS/error_model.json"))
         self.error_model_edit.setReadOnly(require_workflow); form.addRow("误差模型", self.error_model_edit)
         self.max_tokens = QSpinBox(); self.max_tokens.setRange(1, 64); self.max_tokens.setValue(8)
         form.addRow("每条生成 Token 数", self.max_tokens)
@@ -3780,7 +3787,7 @@ class GPT2BatchInferenceWidget(QWidget):
             payload.append(outcome.as_dict())
         self.result_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=6)
         average = sum(agreements) / len(agreements)
-        output = self.project_root / "5_NeuroCIM_opt/outputs/gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "gpt2_batch"
+        output = output_root() / "gui_runs" / datetime.now().strftime("%Y%m%d-%H%M%S") / "gpt2_batch"
         output.mkdir(parents=True, exist_ok=True); result_path = output / "batch_result.json"
         result_path.write_text(json.dumps({"average_device_token_agreement": average,
                                            "samples": payload}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3944,7 +3951,7 @@ class WikiText2EvaluationWidget(QWidget):
             self.result_table.setItem(row, 0, QTableWidgetItem(name))
             self.result_table.setItem(row, 1, QTableWidgetItem(value))
         self.result_table.resizeColumnsToContents(); _fit_result_table_height(self.result_table, max_visible_rows=7)
-        output = (self.project_root / "5_NeuroCIM_opt/outputs/gui_runs"
+        output = (output_root() / "gui_runs"
                   / datetime.now().strftime("%Y%m%d-%H%M%S") / "wikitext2")
         output.mkdir(parents=True, exist_ok=True)
         result_path = output / "evaluation_result.json"
@@ -4414,7 +4421,7 @@ class MainWindow(QMainWindow):
 
     def _open_run_records(self) -> None:
         from PySide6.QtCore import QUrl
-        target = self.platform_root / "outputs"; target.mkdir(parents=True, exist_ok=True); QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        target = output_root(); target.mkdir(parents=True, exist_ok=True); QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def _show_help(self) -> None:
         QMessageBox.information(self, "使用帮助", "建议流程：先完成器件误差建模，再选择网络与数据集，随后运行单样本或批量推理，最后执行误差感知训练。")
@@ -4587,7 +4594,7 @@ class ModelCatalogWidget(QWidget):
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         self.table = QTableWidget()
-        columns = ["使用", "模型", "任务", "数据集", "报告基线", "本机复验", "网络类别", "资源状态"]
+        columns = ["使用", "模型", "任务", "数据集", "浮点精度", "网络类别", "资源状态"]
         self.table.setColumnCount(len(columns))
         self.table.setHorizontalHeaderLabels(columns)
         self.table.setRowCount(len(self.specs))
@@ -4607,8 +4614,7 @@ class ModelCatalogWidget(QWidget):
                 spec.display_name,
                 spec.report_task or _task_display_name(spec.task),
                 spec.report_dataset or ", ".join(spec.datasets),
-                spec.report_baseline or "-",
-                spec.verified_baseline or "待复验",
+                spec.float_metric or "-",
                 spec.model_family or "-",
                 "可用" if spec.resources_available else "未安装",
             ]
@@ -4655,7 +4661,7 @@ class ModelCatalogWidget(QWidget):
         self.selection_status.setText(
             f"当前统一配置：{spec.display_name}　|　数据集：{dataset}　|　"
             f"任务：{spec.report_task or _task_display_name(spec.task)}　|　"
-            f"报告基线：{spec.report_baseline or '-'}"
+            f"浮点精度：{spec.float_metric or '-'}"
         )
 
 

@@ -5,8 +5,8 @@ from datetime import date
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
 
-ROOT=Path(r'E:\Prj_Python\DRAM_CIM_Platform')
-PLATFORM=ROOT/'5_NeuroCIM_opt'
+PLATFORM=Path(__file__).resolve().parents[2]
+ROOT=PLATFORM.parent
 ASSETS=PLATFORM/'docs/report_assets'
 sys.path.insert(0,str(ASSETS))
 from report_builder import (ReportBuilder, validate_docx, math_text, math_concat,

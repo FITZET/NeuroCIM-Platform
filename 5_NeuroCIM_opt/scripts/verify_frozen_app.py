@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -21,6 +22,7 @@ def main() -> int:
     environment["NEUROCIM_RELEASE_SMOKE_SCREENSHOT"] = str(screenshot)
     gpt_result = screenshot.with_name("release_gpt_smoke.txt")
     version_result = screenshot.with_name("release_version_smoke.txt")
+    gpu_result = screenshot.with_name("release_gpu_smoke.json")
     expected_version = os.environ.get("NEUROCIM_RELEASE_EXPECTED_VERSION")
     settings = QSettings("DRAM-CIM", "NeuroSimPlatform")
     saved_settings = {key: settings.value(key) for key in settings.allKeys()}
@@ -57,6 +59,14 @@ def main() -> int:
             timeout=60,
             check=False,
         )
+        gpu_completed = subprocess.run(
+            [str(executable), "--gpu-smoke", str(gpu_result)],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=240,
+            check=False,
+        )
     finally:
         settings.clear()
         for key, value in saved_settings.items():
@@ -78,6 +88,15 @@ def main() -> int:
         raise RuntimeError(f"frozen GPT-2 smoke did not create a success result: {gpt_result}")
     if version_completed.returncode != 0 or not version_result.is_file():
         raise RuntimeError("frozen application version smoke failed")
+    if gpu_completed.returncode != 0 or not gpu_result.is_file():
+        details = gpu_result.read_text(encoding="utf-8") if gpu_result.is_file() else ""
+        raise RuntimeError(
+            f"frozen CUDA execution smoke failed ({gpu_completed.returncode})\n"
+            f"stdout:\n{gpu_completed.stdout}\nstderr:\n{gpu_completed.stderr}\n{details}"
+        )
+    gpu_payload = json.loads(gpu_result.read_text(encoding="utf-8"))
+    if gpu_payload.get("real_cuda_smoke") != "passed":
+        raise RuntimeError(f"frozen CUDA smoke did not pass: {gpu_payload}")
     frozen_version = version_result.read_text(encoding="utf-8").strip()
     if expected_version and frozen_version != expected_version:
         raise RuntimeError(
@@ -86,6 +105,12 @@ def main() -> int:
     print(f"frozen smoke passed: {screenshot}")
     print(f"frozen GPT-2 tokenizer smoke passed: {gpt_result}")
     print(f"frozen application version: {frozen_version}")
+    print(
+        "frozen CUDA smoke passed: "
+        f"torch={gpu_payload.get('torch_version')}, "
+        f"cuda={gpu_payload.get('compiled_cuda')}, "
+        f"gpu={gpu_payload.get('gpu_devices')}"
+    )
     return 0
 
 
