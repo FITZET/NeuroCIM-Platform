@@ -283,7 +283,11 @@ class PlatformService:
             error_model_path=error_model_path,
             summary_path=result.artifacts["summary"],
             plot_paths=plot_paths,
-            metrics=result.interaction_metrics.as_dict(),
+            # The overview cards sit above the fit-quality plot, which is based
+            # on the complete measured-response surface.  Keep those two
+            # numbers on the same definition; interaction/LUT metrics remain
+            # available in the fitting summary and deployable model registry.
+            metrics=result.fits["full_surface"].metrics.as_dict(),
             models=models,
             metadata=result.summary()["acquisition"],
         )

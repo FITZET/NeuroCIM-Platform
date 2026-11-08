@@ -73,8 +73,8 @@ def test_01_nmos_metric_regression_has_no_drift(tmp_path: Path) -> None:
     outcome = PlatformService().fit_cell(
         PROJECT_ROOT / "0_data" / "01_NMOS.csv", tmp_path / "nmos", CellImportOptions({})
     )
-    assert outcome.metrics["r2"] == pytest.approx(0.9908762695039321, abs=1e-12)
-    assert outcome.metrics["nl_percent_fs"] == pytest.approx(6.578497847717723, abs=1e-10)
+    assert outcome.metrics["r2"] == pytest.approx(0.9963795998832011, abs=1e-12)
+    assert outcome.metrics["nl_percent_fs"] == pytest.approx(3.919971810455152, abs=1e-10)
 
 
 def test_widget_background_fit_error_feedback_and_settings(tmp_path: Path) -> None:
