@@ -1,7 +1,9 @@
 param(
     [switch]$SkipTests,
     [switch]$SkipZip,
-    [switch]$ReuseFrozen
+    [switch]$ReuseFrozen,
+    [ValidateSet("CPU", "GPU")]
+    [string]$Flavor = "GPU"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,11 +33,20 @@ if (-not $SkipTests) {
 }
 
 # Never publish a GPU-labelled archive from a CPU-only or non-functional CUDA
-# environment.  The frozen EXE is checked again after packaging.
+# environment. The frozen executable is checked again after packaging. CPU
+# releases use a separate gate in verify_frozen_app.py.
 New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
-$sourceGpuReport = Join-Path $releaseRoot "source_gpu_smoke.json"
-python (Join-Path $platform "scripts\gpu_release_smoke.py") --output $sourceGpuReport
-if ($LASTEXITCODE -ne 0) { throw "Source CUDA release gate failed" }
+if ($Flavor -eq "GPU") {
+    $sourceGpuReport = Join-Path $releaseRoot "source_gpu_smoke.json"
+    python (Join-Path $platform "scripts\gpu_release_smoke.py") --output $sourceGpuReport
+    if ($LASTEXITCODE -ne 0) { throw "Source CUDA release gate failed" }
+} else {
+    $torchCuda = python -c "import torch; print(torch.version.cuda or '')"
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect source CPU PyTorch runtime" }
+    if (($torchCuda | Out-String).Trim()) {
+        throw "CPU release requires a CPU-only PyTorch build"
+    }
+}
 
 $appTarget = Join-Path $portable "NeuroCIM"
 if (-not $ReuseFrozen) {
@@ -136,7 +147,7 @@ foreach ($name in @("train-images-idx3-ubyte", "train-labels-idx1-ubyte", "t10k-
 }
 Copy-ResourceTree (Join-Path $project "data\cifar10\cifar-10-batches-py") (Join-Path $portable "data\cifar10\cifar-10-batches-py")
 
-python (Join-Path $platform "scripts\verify_release_resources.py") $portable
+python (Join-Path $platform "scripts\verify_release_resources.py") $portable --flavor $Flavor
 if ($LASTEXITCODE -ne 0) { throw "Bundled resource verification failed" }
 
 $docsTarget = Join-Path $portable "docs"
@@ -157,9 +168,14 @@ Copy-Item -LiteralPath (Join-Path $project "3_models\GPT2\LICENSE") -Destination
 Copy-ResourceTree (Join-Path $project "3_models\GPT2\licenses") (Join-Path $licensesTarget "GPT2_and_WikiText2")
 
 $smokeImage = Join-Path $releaseRoot "release_smoke.png"
-python (Join-Path $platform "scripts\verify_frozen_app.py") (Join-Path $appTarget "NeuroCIM.exe") $smokeImage
+python (Join-Path $platform "scripts\verify_frozen_app.py") `
+    (Join-Path $appTarget "NeuroCIM.exe") $smokeImage --flavor $Flavor
 if ($LASTEXITCODE -ne 0) { throw "Frozen application smoke test failed" }
-Copy-Item -LiteralPath (Join-Path $releaseRoot "release_gpu_smoke.json") -Destination (Join-Path $portable "gpu_build_diagnostics.json") -Force
+if ($Flavor -eq "GPU") {
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "release_gpu_smoke.json") -Destination (Join-Path $portable "gpu_build_diagnostics.json") -Force
+} else {
+    Copy-Item -LiteralPath (Join-Path $releaseRoot "release_cpu_smoke.json") -Destination (Join-Path $portable "cpu_build_diagnostics.json") -Force
+}
 
 $gpuDiagnosticsLauncher = @'
 @echo off
@@ -177,17 +193,19 @@ if "%RESULT%"=="0" (
 pause
 exit /b %RESULT%
 '@
-[System.IO.File]::WriteAllText(
-    (Join-Path $portable "GPU-Diagnostics.bat"),
-    $gpuDiagnosticsLauncher,
-    [System.Text.Encoding]::ASCII
-)
+if ($Flavor -eq "GPU") {
+    [System.IO.File]::WriteAllText(
+        (Join-Path $portable "GPU-Diagnostics.bat"),
+        $gpuDiagnosticsLauncher,
+        [System.Text.Encoding]::ASCII
+    )
+}
 
 $manifestFiles = Get-ChildItem -LiteralPath $portable -Recurse -File
 $manifest = [ordered]@{
     format_version = 1
     product = "NeuroCIM DRAM CIM Simulation Platform"
-    platform = "Windows x64 (CPU fallback + NVIDIA CUDA 12.1)"
+    platform = if ($Flavor -eq "GPU") { "Windows x64 (CPU fallback + NVIDIA CUDA)" } else { "Windows x64 CPU" }
     built_at = (Get-Date).ToString("o")
     python = (python --version 2>&1 | Out-String).Trim()
     file_count = $manifestFiles.Count
@@ -196,7 +214,11 @@ $manifest = [ordered]@{
     external_assets = @()
     bundled_assets = @("ten model checkpoints", "MNIST", "CIFAR-10", "WikiText-2 raw-v1", "device measurement CSV")
     neurosim_license = "CC BY-NC 4.0"
-    gpu_validation = (Get-Content -LiteralPath (Join-Path $portable "gpu_build_diagnostics.json") -Raw | ConvertFrom-Json)
+    runtime_validation = if ($Flavor -eq "GPU") {
+        Get-Content -LiteralPath (Join-Path $portable "gpu_build_diagnostics.json") -Raw | ConvertFrom-Json
+    } else {
+        Get-Content -LiteralPath (Join-Path $portable "cpu_build_diagnostics.json") -Raw | ConvertFrom-Json
+    }
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $portable "release_manifest.json") -Encoding UTF8
 

@@ -71,6 +71,20 @@ def verify_cuda_runtime(root: Path) -> int:
     return matched
 
 
+def verify_cpu_runtime(root: Path) -> int:
+    """Reject a CPU release that accidentally bundled CUDA libraries."""
+    internal = root / "NeuroCIM" / "_internal"
+    if not internal.is_dir():
+        raise FileNotFoundError(f"Frozen runtime directory is missing: {internal}")
+    forbidden = tuple(internal.glob("torch/lib/*cuda*.dll"))
+    if forbidden:
+        raise ValueError(
+            "CPU release unexpectedly contains CUDA libraries: "
+            + ", ".join(path.name for path in forbidden)
+        )
+    return 0
+
+
 def require_file(root: Path, relative: str) -> Path:
     path = root / relative
     if not path.is_file() or path.stat().st_size == 0:
@@ -173,9 +187,12 @@ def verify_all_model_hashes(root: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("release_root", type=Path)
+    parser.add_argument("--flavor", choices=("CPU", "GPU"), default="GPU")
     args = parser.parse_args()
     root = args.release_root.resolve(strict=True)
-    cuda_library_count = verify_cuda_runtime(root)
+    cuda_library_count = (
+        verify_cuda_runtime(root) if args.flavor == "GPU" else verify_cpu_runtime(root)
+    )
 
     for relative in MODEL_FILES:
         require_file(root, relative)
@@ -208,7 +225,11 @@ def main() -> int:
         f"{gpt2_large_count} GPT-2-large/WikiText files, "
         "MNIST 70000, CIFAR-10 60000, "
         f"{len(csv_files)} device CSV files, "
-        f"{cuda_library_count} CUDA runtime libraries"
+        + (
+            f"{cuda_library_count} CUDA runtime libraries"
+            if args.flavor == "GPU"
+            else "CPU-only runtime without CUDA libraries"
+        )
     )
     return 0
 

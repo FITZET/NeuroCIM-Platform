@@ -53,6 +53,7 @@ try {
         SkipTests = [bool]$SkipTests
         SkipZip = $true
         ReuseFrozen = [bool]$ReuseFrozen
+        Flavor = $Flavor
     }
     & (Join-Path $platform "scripts\build_release.ps1") @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "Portable release build failed" }

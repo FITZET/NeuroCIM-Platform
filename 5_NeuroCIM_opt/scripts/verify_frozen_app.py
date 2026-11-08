@@ -5,15 +5,19 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import argparse
 
 from PySide6.QtCore import QSettings
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: verify_frozen_app.py EXE SCREENSHOT")
-    executable = Path(sys.argv[1]).resolve()
-    screenshot = Path(sys.argv[2]).resolve()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("executable", type=Path)
+    parser.add_argument("screenshot", type=Path)
+    parser.add_argument("--flavor", choices=("CPU", "GPU"), default="GPU")
+    args = parser.parse_args()
+    executable = args.executable.resolve()
+    screenshot = args.screenshot.resolve()
     if not executable.is_file():
         raise FileNotFoundError(executable)
     screenshot.parent.mkdir(parents=True, exist_ok=True)
@@ -22,7 +26,9 @@ def main() -> int:
     environment["NEUROCIM_RELEASE_SMOKE_SCREENSHOT"] = str(screenshot)
     gpt_result = screenshot.with_name("release_gpt_smoke.txt")
     version_result = screenshot.with_name("release_version_smoke.txt")
-    gpu_result = screenshot.with_name("release_gpu_smoke.json")
+    hardware_result = screenshot.with_name(
+        "release_gpu_smoke.json" if args.flavor == "GPU" else "release_cpu_smoke.json"
+    )
     expected_version = os.environ.get("NEUROCIM_RELEASE_EXPECTED_VERSION")
     settings = QSettings("DRAM-CIM", "NeuroSimPlatform")
     saved_settings = {key: settings.value(key) for key in settings.allKeys()}
@@ -60,7 +66,7 @@ def main() -> int:
             check=False,
         )
         gpu_completed = subprocess.run(
-            [str(executable), "--gpu-smoke", str(gpu_result)],
+            [str(executable), "--gpu-smoke", str(hardware_result)],
             env=environment,
             capture_output=True,
             text=True,
@@ -88,15 +94,27 @@ def main() -> int:
         raise RuntimeError(f"frozen GPT-2 smoke did not create a success result: {gpt_result}")
     if version_completed.returncode != 0 or not version_result.is_file():
         raise RuntimeError("frozen application version smoke failed")
-    if gpu_completed.returncode != 0 or not gpu_result.is_file():
-        details = gpu_result.read_text(encoding="utf-8") if gpu_result.is_file() else ""
-        raise RuntimeError(
-            f"frozen CUDA execution smoke failed ({gpu_completed.returncode})\n"
-            f"stdout:\n{gpu_completed.stdout}\nstderr:\n{gpu_completed.stderr}\n{details}"
-        )
-    gpu_payload = json.loads(gpu_result.read_text(encoding="utf-8"))
-    if gpu_payload.get("real_cuda_smoke") != "passed":
-        raise RuntimeError(f"frozen CUDA smoke did not pass: {gpu_payload}")
+    if not hardware_result.is_file():
+        raise RuntimeError("frozen hardware smoke did not create a diagnostics report")
+    hardware_payload = json.loads(hardware_result.read_text(encoding="utf-8"))
+    if args.flavor == "GPU":
+        if gpu_completed.returncode != 0:
+            raise RuntimeError(
+                f"frozen CUDA execution smoke failed ({gpu_completed.returncode})\n"
+                f"stdout:\n{gpu_completed.stdout}\nstderr:\n{gpu_completed.stderr}\n"
+                f"{hardware_result.read_text(encoding='utf-8')}"
+            )
+        if hardware_payload.get("real_cuda_smoke") != "passed":
+            raise RuntimeError(f"frozen CUDA smoke did not pass: {hardware_payload}")
+    else:
+        # --gpu-smoke deliberately exits 3 for a CPU-only runtime, but still
+        # writes the report needed to prove that no CUDA wheel/DLL leaked in.
+        if hardware_payload.get("compiled_cuda") is not None:
+            raise RuntimeError(f"CPU release unexpectedly contains CUDA PyTorch: {hardware_payload}")
+        if hardware_payload.get("torch_cuda_dll_exists"):
+            raise RuntimeError(f"CPU release unexpectedly contains torch_cuda.dll: {hardware_payload}")
+        if "+cpu" not in str(hardware_payload.get("torch_version", "")):
+            raise RuntimeError(f"CPU release does not report a CPU PyTorch build: {hardware_payload}")
     frozen_version = version_result.read_text(encoding="utf-8").strip()
     if expected_version and frozen_version != expected_version:
         raise RuntimeError(
@@ -105,12 +123,15 @@ def main() -> int:
     print(f"frozen smoke passed: {screenshot}")
     print(f"frozen GPT-2 tokenizer smoke passed: {gpt_result}")
     print(f"frozen application version: {frozen_version}")
-    print(
-        "frozen CUDA smoke passed: "
-        f"torch={gpu_payload.get('torch_version')}, "
-        f"cuda={gpu_payload.get('compiled_cuda')}, "
-        f"gpu={gpu_payload.get('gpu_devices')}"
-    )
+    if args.flavor == "GPU":
+        print(
+            "frozen CUDA smoke passed: "
+            f"torch={hardware_payload.get('torch_version')}, "
+            f"cuda={hardware_payload.get('compiled_cuda')}, "
+            f"gpu={hardware_payload.get('gpu_devices')}"
+        )
+    else:
+        print(f"frozen CPU-only runtime passed: torch={hardware_payload.get('torch_version')}")
     return 0
 
 
