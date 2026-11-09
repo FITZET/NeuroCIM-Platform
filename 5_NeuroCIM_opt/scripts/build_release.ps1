@@ -74,6 +74,23 @@ if (-not $ReuseFrozen) {
     throw "Cannot reuse frozen application because NeuroCIM.exe is missing"
 }
 
+# The Windows CPU wheel links fbgemm.dll and torch_cpu.dll against LLVM OpenMP,
+# but PyInstaller does not discover libomp140.x86_64.dll when it is supplied by
+# the Windows/Visual Studio runtime. Bundle it beside the importing Torch DLLs
+# so a clean Windows computer does not fail with WinError 126.
+if ($Flavor -eq "CPU") {
+    $openMpTarget = Join-Path $appTarget "_internal\torch\lib\libomp140.x86_64.dll"
+    $openMpCandidates = @(
+        (Join-Path $env:WINDIR "System32\libomp140.x86_64.dll"),
+        (Get-Command "libomp140.x86_64.dll" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+    $openMpSource = $openMpCandidates | Select-Object -First 1
+    if (-not $openMpSource) {
+        throw "CPU release requires libomp140.x86_64.dll from the LLVM/MSVC runtime"
+    }
+    Copy-Item -LiteralPath $openMpSource -Destination $openMpTarget -Force
+}
+
 $neurosimTarget = Join-Path $appTarget "outputs\neurosim\bin"
 New-Item -ItemType Directory -Force -Path $neurosimTarget | Out-Null
 Copy-Item -LiteralPath (Join-Path $platform "outputs\neurosim\bin\neurosim.exe") -Destination $neurosimTarget

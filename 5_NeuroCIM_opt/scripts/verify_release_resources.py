@@ -82,7 +82,12 @@ def verify_cpu_runtime(root: Path) -> int:
             "CPU release unexpectedly contains CUDA libraries: "
             + ", ".join(path.name for path in forbidden)
         )
-    return 0
+    openmp = internal / "torch/lib/libomp140.x86_64.dll"
+    if not openmp.is_file() or openmp.stat().st_size == 0:
+        raise FileNotFoundError(
+            "CPU release is missing libomp140.x86_64.dll required by fbgemm.dll"
+        )
+    return 1
 
 
 def require_file(root: Path, relative: str) -> Path:
@@ -228,7 +233,7 @@ def main() -> int:
         + (
             f"{cuda_library_count} CUDA runtime libraries"
             if args.flavor == "GPU"
-            else "CPU-only runtime without CUDA libraries"
+            else f"CPU-only runtime without CUDA libraries and {cuda_library_count} OpenMP runtime"
         )
     )
     return 0
